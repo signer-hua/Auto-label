@@ -1,0 +1,25 @@
+# docker-compose 配置
+version: '3.8'
+
+services:
+  auto-label:
+    build:
+      context: ..
+      dockerfile: Auto-label/Dockerfile
+    ports:
+      - "8000:8000"
+      - "5173:5173"
+    volumes:
+      - ./backend/uploads:/app/Auto-label/backend/uploads
+      - ./backend/outputs:/app/Auto-label/backend/outputs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONPATH=/app:/app/Auto-label
+    restart: unless-stopped
