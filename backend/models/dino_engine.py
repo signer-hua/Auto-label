@@ -23,7 +23,7 @@ _DINOV3_LIB = _LIBS_ROOT / "dinov3"
 if str(_DINOV3_LIB) not in sys.path:
     sys.path.insert(0, str(_DINOV3_LIB))
 
-from backend.core.config import DINO_DEVICE, COSINE_SIMILARITY_THRESHOLD
+from backend.core.config import DINO_DEVICE, COSINE_SIMILARITY_THRESHOLD, DINO_CLUSTER_NUM
 
 import logging
 logger = logging.getLogger(__name__)
@@ -210,15 +210,95 @@ class DINOEngine:
         # 连通域分析
         labeled, num_features = ndimage.label(match_full)
         bboxes = []
+
+        # 动态小区域过滤阈值：基于原图分辨率自适应
+        min_area = max(50, int(img_w * img_h / 10000))
+
         for label_id in range(1, num_features + 1):
             region = (labeled == label_id)
-            if region.sum() < 100:  # 过滤太小的区域
+            if region.sum() < min_area:  # 动态阈值过滤
                 continue
             ys, xs = np.where(region)
             bboxes.append([float(xs.min()), float(ys.min()),
                            float(xs.max()), float(ys.max())])
 
         return match_full, bboxes
+
+    @torch.no_grad()
+    def extract_patch_features_clustering(
+        self,
+        image: Image.Image,
+        n_clusters: int = DINO_CLUSTER_NUM,
+    ) -> tuple[np.ndarray, list[np.ndarray], int, int]:
+        """
+        全图 patch 特征 K-Means 聚类，用于模式3 粗分割实例生成。
+
+        流程：
+        1. 提取全图 patch 特征 [N, 384]
+        2. K-Means 聚类为 n_clusters 个簇
+        3. 将聚类标签映射回 patch 网格 → 上采样到原图大小
+        4. 每个簇作为一个粗分割实例
+
+        Args:
+            image: PIL Image (RGB)
+            n_clusters: 聚类数量，默认 8
+
+        Returns:
+            cluster_map: 聚类标签图，shape [H_img, W_img]，值 0~n_clusters-1
+            instance_masks: 每个簇的布尔 Mask 列表，shape [H_img, W_img]
+            h_patches: patch 网格高度
+            w_patches: patch 网格宽度
+        """
+        from sklearn.cluster import KMeans
+        import cv2
+
+        if not self._warmed_up:
+            self.warmup()
+
+        img_w, img_h = image.size
+        patch_feats, h, w = self.extract_patch_features(image)
+
+        # K-Means 聚类
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10, max_iter=100)
+        labels = kmeans.fit_predict(patch_feats)  # [h*w]
+        label_grid = labels.reshape(h, w)
+
+        # 上采样到原图大小
+        cluster_map = cv2.resize(
+            label_grid.astype(np.uint8), (img_w, img_h),
+            interpolation=cv2.INTER_NEAREST
+        )
+
+        # 生成每个簇的布尔 Mask
+        instance_masks = []
+        for cid in range(n_clusters):
+            mask = (cluster_map == cid)
+            # 过滤面积过小的簇（< 原图面积的 0.5%）
+            if mask.sum() > img_w * img_h * 0.005:
+                instance_masks.append(mask)
+
+        logger.info("[DINOv3] Clustering: %d clusters → %d valid instances",
+                    n_clusters, len(instance_masks))
+        return cluster_map, instance_masks, h, w
+
+    @torch.no_grad()
+    def extract_instance_feature(
+        self,
+        image: Image.Image,
+        instance_mask: np.ndarray,
+    ) -> np.ndarray:
+        """
+        提取指定实例 Mask 区域的全局特征模板（模式3 选中实例后调用）。
+        与 extract_mask_feature 逻辑一致，独立方法便于语义区分。
+
+        Args:
+            image: PIL Image (RGB)
+            instance_mask: 布尔 numpy 数组，shape [H, W]
+
+        Returns:
+            feature: L2 归一化的特征向量，shape [384]
+        """
+        return self.extract_mask_feature(image, instance_mask)
 
     def release_memory(self) -> None:
         """释放 GPU 显存"""

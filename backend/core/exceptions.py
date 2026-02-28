@@ -57,6 +57,20 @@ class NoDetectionResultError(Exception):
         super().__init__(f"No detection results ({mode}): {detail}")
 
 
+class NoInstanceDetectedError(Exception):
+    """参考图粗分割无实例生成（模式3）"""
+    def __init__(self, detail: str = "参考图未检测到可分割实例，请更换图片或调整聚类参数"):
+        self.detail = detail
+        super().__init__(detail)
+
+
+class GPUOOMError(Exception):
+    """GPU 显存不足"""
+    def __init__(self, detail: str = "显存不足，建议压缩图片分辨率或关闭其他程序"):
+        self.detail = detail
+        super().__init__(detail)
+
+
 def register_exception_handlers(app):
     """
     注册全局异常处理器到 FastAPI 应用。
@@ -113,4 +127,18 @@ def register_exception_handlers(app):
         return JSONResponse(
             status_code=200,
             content={"error": "no_detection_result", "detail": str(exc), "mode": exc.mode},
+        )
+
+    @app.exception_handler(NoInstanceDetectedError)
+    async def no_instance_handler(request: Request, exc: NoInstanceDetectedError):
+        return JSONResponse(
+            status_code=200,
+            content={"error": "no_instance_detected", "detail": str(exc)},
+        )
+
+    @app.exception_handler(GPUOOMError)
+    async def gpu_oom_handler(request: Request, exc: GPUOOMError):
+        return JSONResponse(
+            status_code=503,
+            content={"error": "gpu_oom", "detail": str(exc)},
         )

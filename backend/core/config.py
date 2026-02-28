@@ -67,6 +67,33 @@ MASK_ALPHA = 128
 MASK_MODE1_COLOR = (0, 120, 255)
 MASK_MODE1_ALPHA = 140
 
+# 模式3 Mask 颜色（绿色，与模式1/2 视觉区分）
+MASK_MODE3_COLOR = (0, 255, 0)
+MASK_MODE3_ALPHA = 130
+
+# 模式1 多类别颜色调色板（最多 20 个类别循环使用）
+MODE1_CATEGORY_COLORS = [
+    (0, 120, 255),   # 蓝色
+    (255, 200, 0),   # 黄色
+    (255, 0, 150),   # 粉色
+    (0, 220, 180),   # 青色
+    (180, 80, 255),  # 紫色
+    (255, 120, 0),   # 橙色
+    (0, 200, 80),    # 绿色
+    (200, 200, 0),   # 橄榄
+    (100, 150, 255), # 浅蓝
+    (255, 100, 100), # 浅红
+]
+
+# ==================== DINOv3 聚类参数（模式3） ====================
+DINO_CLUSTER_NUM = int(os.getenv("DINO_CLUSTER_NUM", "8"))  # K-Means 聚类数
+
+# ==================== YOLO-World 低阈值（重试用） ====================
+YOLOWORLD_SCORE_THR_LOW = float(os.getenv("YOLOWORLD_SCORE_THR_LOW", "0.2"))
+
+# ==================== Redis 任务过期时间 ====================
+REDIS_TASK_EXPIRE = int(os.getenv("REDIS_TASK_EXPIRE", "86400"))  # 默认 24 小时
+
 # ==================== 服务器配置 ====================
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))

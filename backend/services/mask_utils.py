@@ -92,3 +92,77 @@ def mask_to_bbox(mask: np.ndarray) -> list[float]:
         return [0.0, 0.0, 0.0, 0.0]
     x1, y1, x2, y2 = float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
     return [x1, y1, x2 - x1, y2 - y1]
+
+
+def generate_voc_annotation(
+    filename: str,
+    img_width: int,
+    img_height: int,
+    objects: list[dict],
+) -> str:
+    """
+    生成 Pascal VOC XML 格式标注字符串。
+
+    Args:
+        filename: 图片文件名
+        img_width: 图片宽度
+        img_height: 图片高度
+        objects: 目标列表，每项 {"name": str, "bbox": [x1,y1,x2,y2]}
+
+    Returns:
+        xml_string: VOC XML 字符串
+    """
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<annotation>',
+        f'  <filename>{filename}</filename>',
+        '  <size>',
+        f'    <width>{img_width}</width>',
+        f'    <height>{img_height}</height>',
+        '    <depth>3</depth>',
+        '  </size>',
+    ]
+    for obj in objects:
+        x1, y1, x2, y2 = obj["bbox"]
+        lines.extend([
+            '  <object>',
+            f'    <name>{obj["name"]}</name>',
+            '    <difficult>0</difficult>',
+            '    <bndbox>',
+            f'      <xmin>{int(x1)}</xmin>',
+            f'      <ymin>{int(y1)}</ymin>',
+            f'      <xmax>{int(x2)}</xmax>',
+            f'      <ymax>{int(y2)}</ymax>',
+            '    </bndbox>',
+            '  </object>',
+        ])
+    lines.append('</annotation>')
+    return '\n'.join(lines)
+
+
+def generate_yolo_annotation(
+    img_width: int,
+    img_height: int,
+    objects: list[dict],
+) -> str:
+    """
+    生成 YOLO txt 格式标注字符串。
+    每行格式：class_id cx cy w h（归一化坐标）
+
+    Args:
+        img_width: 图片宽度
+        img_height: 图片高度
+        objects: 目标列表，每项 {"class_id": int, "bbox": [x1,y1,x2,y2]}
+
+    Returns:
+        txt_string: YOLO 格式字符串
+    """
+    lines = []
+    for obj in objects:
+        x1, y1, x2, y2 = obj["bbox"]
+        cx = (x1 + x2) / 2.0 / img_width
+        cy = (y1 + y2) / 2.0 / img_height
+        w = (x2 - x1) / img_width
+        h = (y2 - y1) / img_height
+        lines.append(f'{obj["class_id"]} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}')
+    return '\n'.join(lines)

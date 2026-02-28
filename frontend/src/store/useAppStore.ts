@@ -1,8 +1,9 @@
 /**
  * Zustand 全局状态管理
  *
- * 管理：标注模式（mode1/mode2）、文本提示、上传图片列表、
- *       当前选中图片、框选坐标、task_id、任务状态、进度、Mask URL 映射表。
+ * 管理：三种标注模式（mode1/mode2/mode3）、文本提示、上传图片列表、
+ *       框选坐标、task_id、任务状态、进度、Mask URL 映射表、
+ *       模式3 实例选择、Mask 透明度、任务控制（暂停/取消）。
  */
 import { create } from 'zustand';
 
@@ -10,8 +11,8 @@ import { create } from 'zustand';
 export interface ImageItem {
   id: string;
   filename: string;
-  url: string;       // 原图访问 URL
-  path: string;      // 后端本地路径
+  url: string;
+  path: string;
 }
 
 /** 框选坐标 */
@@ -22,45 +23,62 @@ export interface BBox {
   height: number;
 }
 
+/** 模式3 粗分割实例 */
+export interface InstanceItem {
+  id: number;
+  mask_url: string;
+  bbox: number[];
+  color: number[];
+}
+
 /** 工具类型 */
 export type ToolType = 'select' | 'pan' | 'zoom';
 
 /** 标注模式 */
-export type AnnotationMode = 'mode1' | 'mode2';
+export type AnnotationMode = 'mode1' | 'mode2' | 'mode3';
 
 /** 任务状态 */
-export type TaskStatus = 'idle' | 'pending' | 'processing' | 'success' | 'failed';
+export type TaskStatus =
+  | 'idle' | 'pending' | 'processing' | 'success' | 'failed'
+  | 'paused' | 'canceled' | 'instance_ready';
 
 /** 全局状态 */
 interface AppState {
   // ===== 标注模式 =====
-  currentMode: AnnotationMode;            // 当前标注模式
-  textPrompt: string;                     // 模式1 文本提示
+  currentMode: AnnotationMode;
+  textPrompt: string;
 
   // ===== 图片管理 =====
-  images: ImageItem[];                    // 已上传图片列表
-  selectedImageId: string | null;         // 当前选中的图片 ID（参考图 / 主画布显示）
-  viewingImageId: string | null;          // 右侧面板正在查看的图片 ID
+  images: ImageItem[];
+  selectedImageId: string | null;
+  viewingImageId: string | null;
 
   // ===== 交互工具 =====
-  activeTool: ToolType;                   // 当前激活的工具
-  bbox: BBox | null;                      // 用户框选的坐标（画布像素坐标）
-  isDrawing: boolean;                     // 是否正在框选
+  activeTool: ToolType;
+  bbox: BBox | null;
+  isDrawing: boolean;
 
   // ===== 异步任务 =====
-  taskId: string | null;                  // 当前任务 ID
-  taskStatus: TaskStatus;                 // 任务状态
-  taskProgress: number;                   // 已完成数量
-  taskTotal: number;                      // 总数量
-  taskMessage: string;                    // 状态消息
+  taskId: string | null;
+  taskStatus: TaskStatus;
+  taskProgress: number;
+  taskTotal: number;
+  taskMessage: string;
+  errorType: string | null;
 
   // ===== Mask 结果 =====
-  maskUrls: Record<string, string[]>;     // {image_id: [mask_url, ...]}
-  exportUrl: string | null;               // COCO 导出 URL
+  maskUrls: Record<string, string[]>;
+  exportUrl: string | null;
+  maskOpacity: number;  // Mask 透明度 0~1
+
+  // ===== 模式3 实例选择 =====
+  discoveryTaskId: string | null;
+  instanceMasks: InstanceItem[];
+  selectedInstanceId: number | null;
 
   // ===== 画布状态 =====
-  stageScale: number;                     // 缩放比例
-  stagePosition: { x: number; y: number }; // 平移偏移
+  stageScale: number;
+  stagePosition: { x: number; y: number };
 
   // ===== Actions =====
   setCurrentMode: (mode: AnnotationMode) => void;
@@ -77,8 +95,13 @@ interface AppState {
   setTask: (taskId: string, status: TaskStatus) => void;
   updateTaskProgress: (progress: number, total: number, message: string) => void;
   setTaskStatus: (status: TaskStatus, message?: string) => void;
+  setErrorType: (errorType: string | null) => void;
   setMaskUrls: (urls: Record<string, string[]>) => void;
   setExportUrl: (url: string | null) => void;
+  setMaskOpacity: (opacity: number) => void;
+  setDiscoveryTaskId: (id: string | null) => void;
+  setInstanceMasks: (instances: InstanceItem[]) => void;
+  setSelectedInstanceId: (id: number | null) => void;
   setStageScale: (scale: number) => void;
   setStagePosition: (pos: { x: number; y: number }) => void;
   resetTask: () => void;
@@ -99,14 +122,19 @@ export const useAppStore = create<AppState>((set) => ({
   taskProgress: 0,
   taskTotal: 0,
   taskMessage: '',
+  errorType: null,
   maskUrls: {},
   exportUrl: null,
+  maskOpacity: 0.7,
+  discoveryTaskId: null,
+  instanceMasks: [],
+  selectedInstanceId: null,
   stageScale: 1,
   stagePosition: { x: 0, y: 0 },
 
   // Actions
   setCurrentMode: (mode) =>
-    set({ currentMode: mode, bbox: null }),
+    set({ currentMode: mode, bbox: null, instanceMasks: [], selectedInstanceId: null }),
 
   setTextPrompt: (text) =>
     set({ textPrompt: text }),
@@ -145,7 +173,7 @@ export const useAppStore = create<AppState>((set) => ({
     set({ isDrawing: drawing }),
 
   setTask: (taskId, status) =>
-    set({ taskId, taskStatus: status, taskProgress: 0, taskTotal: 0, taskMessage: '' }),
+    set({ taskId, taskStatus: status, taskProgress: 0, taskTotal: 0, taskMessage: '', errorType: null }),
 
   updateTaskProgress: (progress, total, message) =>
     set({ taskProgress: progress, taskTotal: total, taskMessage: message }),
@@ -153,11 +181,26 @@ export const useAppStore = create<AppState>((set) => ({
   setTaskStatus: (status, message) =>
     set((s) => ({ taskStatus: status, taskMessage: message ?? s.taskMessage })),
 
+  setErrorType: (errorType) =>
+    set({ errorType }),
+
   setMaskUrls: (urls) =>
     set({ maskUrls: urls }),
 
   setExportUrl: (url) =>
     set({ exportUrl: url }),
+
+  setMaskOpacity: (opacity) =>
+    set({ maskOpacity: opacity }),
+
+  setDiscoveryTaskId: (id) =>
+    set({ discoveryTaskId: id }),
+
+  setInstanceMasks: (instances) =>
+    set({ instanceMasks: instances }),
+
+  setSelectedInstanceId: (id) =>
+    set({ selectedInstanceId: id }),
 
   setStageScale: (scale) =>
     set({ stageScale: scale }),
@@ -172,7 +215,11 @@ export const useAppStore = create<AppState>((set) => ({
       taskProgress: 0,
       taskTotal: 0,
       taskMessage: '',
+      errorType: null,
       maskUrls: {},
       exportUrl: null,
+      discoveryTaskId: null,
+      instanceMasks: [],
+      selectedInstanceId: null,
     }),
 }));
