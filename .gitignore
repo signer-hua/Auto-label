@@ -31,11 +31,12 @@ frontend/.vite/
 .DS_Store
 Thumbs.db
 
-# 模型权重
+# 模型权重（太大不提交）
 *.pth
 *.pt
 *.onnx
 *.bin
+!backend/libs/sam3/sam3/assets/*.gz
 
 # 日志
 *.log

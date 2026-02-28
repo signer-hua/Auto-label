@@ -1,4 +1,4 @@
-# ==================== 后端依赖 ====================
+# ==================== Auto-label 后端依赖 ====================
 # FastAPI 框架
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
@@ -16,19 +16,23 @@ torch>=2.0.0
 torchvision>=0.15.0
 scikit-learn>=1.4.0
 
-# DINOv3 依赖
+# ==================== DINOv3 依赖 ====================
 ftfy
 omegaconf
 regex
 
-# SAM3 依赖
+# ==================== SAM3 依赖 ====================
 timm>=1.0.17
 huggingface_hub
 tqdm
 typing_extensions
 
-# YOLO-World 依赖 (需要 OpenMIM 安装 mmcv)
-# pip install openmim && mim install mmcv==2.0.0
+# ==================== YOLO-World 依赖 ====================
+# 注意：mmcv 需要通过 openmim 安装，不能直接 pip install
+# 安装方式：pip install openmim && mim install mmcv==2.0.0
 mmengine>=0.10.3
 mmdet>=3.0.0
+mmyolo>=0.6.0
 transformers>=4.36.0
+albumentations
+supervision

@@ -1,7 +1,7 @@
 """
 SAM3 分割器封装
-负责：基于提示（边界框/点/聚类区域）生成精准实例 mask
-使用 SAM3 模型（848M 参数）
+负责：基于提示（边界框/点/文本）生成精准实例 mask
+算法库已内置于 backend/libs/sam3/ 中
 """
 import sys
 import torch
@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from PIL import Image
 
-# 将 sam3 加入 Python 路径
-SAM3_PATH = Path(__file__).parent.parent.parent.parent / "sam3"
-if str(SAM3_PATH) not in sys.path:
-    sys.path.insert(0, str(SAM3_PATH))
+# 将内置的 sam3 库加入 Python 路径
+_LIBS_ROOT = Path(__file__).parent.parent / "libs"
+_SAM3_LIB = _LIBS_ROOT / "sam3"
+if str(_SAM3_LIB) not in sys.path:
+    sys.path.insert(0, str(_SAM3_LIB))
 
 
 class SAM3Segmentor:

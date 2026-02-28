@@ -33,23 +33,25 @@ RUN pip3 install openmim && mim install mmcv==2.0.0
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip3 install -r /app/backend/requirements.txt
 
-# 复制算法库
-COPY dinov3/ /app/dinov3/
-COPY sam3/ /app/sam3/
-COPY YOLO-World/ /app/YOLO-World/
+# 安装内置算法库
+COPY backend/libs/dinov3/ /app/backend/libs/dinov3/
+COPY backend/libs/sam3/ /app/backend/libs/sam3/
+COPY backend/libs/yolo_world/ /app/backend/libs/yolo_world/
+RUN pip3 install -e /app/backend/libs/dinov3
+RUN pip3 install -e /app/backend/libs/sam3
+RUN pip3 install -e /app/backend/libs/yolo_world
 
 # 复制后端代码
 COPY backend/ /app/backend/
-COPY Auto-label/backend/ /app/Auto-label/backend/
 
 # 复制前端构建产物
-COPY --from=frontend-builder /app/frontend/dist /app/Auto-label/frontend/dist
+COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
 # 创建必要目录
-RUN mkdir -p /app/Auto-label/backend/uploads /app/Auto-label/backend/outputs
+RUN mkdir -p /app/backend/uploads /app/backend/outputs
 
 # 环境变量
-ENV PYTHONPATH="/app:/app/Auto-label"
+ENV PYTHONPATH="/app"
 ENV CUDA_VISIBLE_DEVICES=0
 
 # 暴露端口

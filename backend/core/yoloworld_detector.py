@@ -2,6 +2,7 @@
 YOLO-World 检测器封装
 负责：基于文本提示的开放词汇目标检测
 使用 YOLO-World-v2-S (Small) 模型
+算法库已内置于 backend/libs/yolo_world/ 中
 """
 import sys
 import os
@@ -12,10 +13,17 @@ from pathlib import Path
 from typing import List, Dict, Tuple
 from PIL import Image
 
-# 将 YOLO-World 加入 Python 路径
-YOLOWORLD_PATH = Path(__file__).parent.parent.parent.parent / "YOLO-World"
-if str(YOLOWORLD_PATH) not in sys.path:
-    sys.path.insert(0, str(YOLOWORLD_PATH))
+# 将内置的 yolo_world 库加入 Python 路径
+_LIBS_ROOT = Path(__file__).parent.parent / "libs"
+_YOLOWORLD_LIB = _LIBS_ROOT / "yolo_world"
+if str(_YOLOWORLD_LIB) not in sys.path:
+    sys.path.insert(0, str(_YOLOWORLD_LIB))
+
+# 默认配置文件路径（内置）
+_DEFAULT_CONFIG = str(
+    _YOLOWORLD_LIB / "configs" / "pretrain" /
+    "yolo_world_v2_s_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py"
+)
 
 
 class YOLOWorldDetector:
@@ -33,7 +41,7 @@ class YOLOWorldDetector:
         初始化 YOLO-World 检测器
 
         Args:
-            config_path: 模型配置文件路径
+            config_path: 模型配置文件路径，留空使用内置默认配置
             weights_path: 预训练权重路径
             device: 推理设备
             score_thr: 检测置信度阈值
@@ -44,16 +52,7 @@ class YOLOWorldDetector:
         self.nms_thr = nms_thr
         self.model = None
         self.test_pipeline = None
-
-        # 默认配置路径
-        if not config_path:
-            self.config_path = str(
-                YOLOWORLD_PATH / "configs" / "pretrain" /
-                "yolo_world_v2_s_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py"
-            )
-        else:
-            self.config_path = config_path
-
+        self.config_path = config_path if config_path else _DEFAULT_CONFIG
         self.weights_path = weights_path
 
     def load_model(self):
@@ -62,6 +61,9 @@ class YOLOWorldDetector:
             return
 
         print("[YOLO-World] 正在加载模型...")
+
+        # 确保 yolo_world 包已注册到 mmdet Registry
+        import yolo_world  # noqa: F401 — 触发所有 @MODELS.register_module()
 
         from mmengine.config import Config
         from mmengine.dataset import Compose

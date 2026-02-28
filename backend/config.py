@@ -1,5 +1,6 @@
 """
 项目全局配置文件
+所有算法库已内置于 backend/libs/ 目录中，无需外部依赖
 支持通过环境变量或配置文件覆盖默认参数
 """
 import os
@@ -8,18 +9,26 @@ from pydantic import BaseModel
 
 
 # ==================== 路径配置 ====================
+# 项目根目录: Auto-label/
 PROJECT_ROOT = Path(__file__).parent.parent
+# 后端根目录: Auto-label/backend/
 BACKEND_ROOT = Path(__file__).parent
+# 内置算法库根目录: Auto-label/backend/libs/
+LIBS_ROOT = BACKEND_ROOT / "libs"
+# 上传/输出目录
 UPLOAD_DIR = BACKEND_ROOT / "uploads"
 OUTPUT_DIR = BACKEND_ROOT / "outputs"
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# 算法库路径（相对于 auto-label 根目录）
-AUTO_LABEL_ROOT = PROJECT_ROOT.parent
-DINOV3_PATH = AUTO_LABEL_ROOT / "dinov3"
-SAM3_PATH = AUTO_LABEL_ROOT / "sam3"
-YOLOWORLD_PATH = AUTO_LABEL_ROOT / "YOLO-World"
+# 内置算法库路径
+DINOV3_LIB_PATH = LIBS_ROOT / "dinov3"
+SAM3_LIB_PATH = LIBS_ROOT / "sam3"
+YOLOWORLD_LIB_PATH = LIBS_ROOT / "yolo_world"
+
+# YOLO-World 配置文件路径（内置）
+YOLOWORLD_CONFIG_PATH = YOLOWORLD_LIB_PATH / "configs" / "pretrain" / \
+    "yolo_world_v2_s_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py"
 
 
 class ModelConfig(BaseModel):
@@ -33,11 +42,8 @@ class ModelConfig(BaseModel):
     sam3_checkpoint: str = ""  # 留空则自动从 HuggingFace 下载
 
     # YOLO-World 配置
-    yoloworld_config: str = str(
-        YOLOWORLD_PATH / "configs" / "pretrain" /
-        "yolo_world_v2_s_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py"
-    )
-    yoloworld_weights: str = ""  # 留空则使用默认权重路径
+    yoloworld_config: str = str(YOLOWORLD_CONFIG_PATH)
+    yoloworld_weights: str = ""  # 需要手动下载并指定路径
     yoloworld_device: str = "cuda"
     yoloworld_score_thr: float = 0.3  # 检测置信度阈值
     yoloworld_nms_thr: float = 0.7  # NMS 阈值

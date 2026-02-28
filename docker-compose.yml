@@ -1,17 +1,16 @@
-# docker-compose 配置
+# Auto-label Docker Compose 配置
 version: '3.8'
 
 services:
   auto-label:
     build:
-      context: ..
-      dockerfile: Auto-label/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
-      - "5173:5173"
     volumes:
-      - ./backend/uploads:/app/Auto-label/backend/uploads
-      - ./backend/outputs:/app/Auto-label/backend/outputs
+      - ./backend/uploads:/app/backend/uploads
+      - ./backend/outputs:/app/backend/outputs
     deploy:
       resources:
         reservations:
@@ -21,5 +20,5 @@ services:
               capabilities: [gpu]
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      - PYTHONPATH=/app:/app/Auto-label
+      - PYTHONPATH=/app
     restart: unless-stopped

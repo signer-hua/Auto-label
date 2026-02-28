@@ -2,6 +2,7 @@
 DINOv3 特征提取器封装
 负责：图像全局/局部特征提取、特征匹配、K-Means聚类
 使用 DINOv3 ViT-S/16 (384维特征)
+算法库已内置于 backend/libs/dinov3/ 中
 """
 import sys
 import torch
@@ -12,10 +13,11 @@ from PIL import Image
 from torchvision import transforms
 from sklearn.cluster import KMeans
 
-# 将 dinov3 加入 Python 路径
-DINOV3_PATH = Path(__file__).parent.parent.parent.parent / "dinov3"
-if str(DINOV3_PATH) not in sys.path:
-    sys.path.insert(0, str(DINOV3_PATH))
+# 将内置的 dinov3 库加入 Python 路径
+_LIBS_ROOT = Path(__file__).parent.parent / "libs"
+_DINOV3_LIB = _LIBS_ROOT / "dinov3"
+if str(_DINOV3_LIB) not in sys.path:
+    sys.path.insert(0, str(_DINOV3_LIB))
 
 
 class DINOFeatureExtractor:
@@ -166,7 +168,6 @@ class DINOFeatureExtractor:
         _, c, h, w = patch_feat_map.shape
 
         # 将 mask 缩放到 patch 网格大小
-        from torchvision.transforms.functional import resize
         mask_tensor = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
         mask_resized = torch.nn.functional.interpolate(
             mask_tensor, size=(h, w), mode='bilinear', align_corners=False
@@ -187,28 +188,12 @@ class DINOFeatureExtractor:
 
     def cosine_similarity(self, feat_a: np.ndarray,
                            feat_b: np.ndarray) -> float:
-        """
-        计算两个特征向量的余弦相似度
-
-        Args:
-            feat_a: shape [D]
-            feat_b: shape [D]
-        Returns:
-            similarity: float, 范围 [-1, 1]
-        """
+        """计算两个特征向量的余弦相似度"""
         return float(np.dot(feat_a, feat_b))
 
     def batch_cosine_similarity(self, query: np.ndarray,
                                  gallery: np.ndarray) -> np.ndarray:
-        """
-        批量计算余弦相似度
-
-        Args:
-            query: shape [D]
-            gallery: shape [N, D]
-        Returns:
-            similarities: shape [N]
-        """
+        """批量计算余弦相似度"""
         return gallery @ query  # 已 L2 归一化，点积即余弦相似度
 
     def match_features(self, template_features: List[np.ndarray],
@@ -224,7 +209,6 @@ class DINOFeatureExtractor:
         Returns:
             match_mask: bool array, shape [N]，True 表示匹配
         """
-        # 对每个模板计算相似度，取最大值
         max_sim = np.zeros(len(patch_features))
         for template in template_features:
             sim = self.batch_cosine_similarity(template, patch_features)
