@@ -2,13 +2,13 @@
  * 主画布组件
  * 基于 react-konva 实现三层图层：
  *   Layer0: 原图层 — 显示当前选中的图像
- *   Layer1: 交互层 — 鼠标框选矩形
- *   Layer2: 结果层 — Mask 透明 PNG 叠加
+ *   Layer1: 交互层 — 鼠标框选矩形（仅模式2 激活）
+ *   Layer2: 结果层 — Mask 透明 PNG 叠加（模式1 蓝色 / 模式2 红色）
  *
  * 支持缩放/平移，Mask 图层与原图同步变换。
  */
 import React, { useRef, useCallback, useEffect, useState } from 'react';
-import { Stage, Layer, Image as KonvaImage, Rect, Transformer } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Rect } from 'react-konva';
 import useImage from 'use-image';
 import { useAppStore } from '../store/useAppStore';
 
@@ -25,7 +25,7 @@ const MainCanvas: React.FC = () => {
 
   const {
     images, selectedImageId, viewingImageId,
-    activeTool, bbox, isDrawing,
+    currentMode, activeTool, bbox, isDrawing,
     maskUrls,
     stageScale, stagePosition,
     setBBox, setIsDrawing,
@@ -60,25 +60,27 @@ const MainCanvas: React.FC = () => {
     return () => observer.disconnect();
   }, []);
 
+  // 框选仅在模式2 + select 工具下激活
+  const canDraw = currentMode === 'mode2' && activeTool === 'select';
+
   /** 鼠标按下：开始框选 */
   const handleMouseDown = useCallback((e: any) => {
-    if (activeTool !== 'select') return;
+    if (!canDraw) return;
 
     const stage = stageRef.current;
     if (!stage) return;
 
-    // 获取画布坐标（考虑缩放和平移）
     const pos = stage.getRelativePointerPosition();
     if (!pos) return;
 
     drawStart.current = { x: pos.x, y: pos.y };
     setBBox({ x: pos.x, y: pos.y, width: 0, height: 0 });
     setIsDrawing(true);
-  }, [activeTool, setBBox, setIsDrawing]);
+  }, [canDraw, setBBox, setIsDrawing]);
 
   /** 鼠标移动：更新框选矩形 */
-  const handleMouseMove = useCallback((e: any) => {
-    if (!isDrawing || activeTool !== 'select' || !drawStart.current) return;
+  const handleMouseMove = useCallback(() => {
+    if (!isDrawing || !canDraw || !drawStart.current) return;
 
     const stage = stageRef.current;
     if (!stage) return;
@@ -92,7 +94,7 @@ const MainCanvas: React.FC = () => {
     const height = Math.abs(pos.y - drawStart.current.y);
 
     setBBox({ x, y, width, height });
-  }, [isDrawing, activeTool, setBBox]);
+  }, [isDrawing, canDraw, setBBox]);
 
   /** 鼠标松开：完成框选 */
   const handleMouseUp = useCallback(() => {
@@ -115,7 +117,6 @@ const MainCanvas: React.FC = () => {
     const newScale = e.evt.deltaY < 0 ? oldScale * scaleBy : oldScale / scaleBy;
     const clampedScale = Math.max(0.1, Math.min(5, newScale));
 
-    // 以鼠标位置为中心缩放
     const mousePointTo = {
       x: (pointer.x - stagePosition.x) / oldScale,
       y: (pointer.y - stagePosition.y) / oldScale,
@@ -128,12 +129,23 @@ const MainCanvas: React.FC = () => {
     });
   }, [stageScale, stagePosition, setStageScale, setStagePosition]);
 
-  /** 拖拽平移（pan 工具激活时） */
+  /** 拖拽平移 */
   const handleDragEnd = useCallback((e: any) => {
-    if (activeTool === 'pan') {
+    if (activeTool === 'pan' || currentMode === 'mode1') {
       setStagePosition({ x: e.target.x(), y: e.target.y() });
     }
-  }, [activeTool, setStagePosition]);
+  }, [activeTool, currentMode, setStagePosition]);
+
+  // 光标样式
+  const getCursor = () => {
+    if (currentMode === 'mode1') return 'default';
+    if (activeTool === 'select') return 'crosshair';
+    if (activeTool === 'pan') return 'grab';
+    return 'zoom-in';
+  };
+
+  // 画布是否可拖拽（模式1 始终可拖拽，模式2 仅 pan 工具）
+  const isDraggable = currentMode === 'mode1' || activeTool === 'pan';
 
   return (
     <div
@@ -142,7 +154,8 @@ const MainCanvas: React.FC = () => {
         flex: 1,
         background: '#2a2a2a',
         overflow: 'hidden',
-        cursor: activeTool === 'select' ? 'crosshair' : activeTool === 'pan' ? 'grab' : 'zoom-in',
+        position: 'relative',
+        cursor: getCursor(),
       }}
     >
       <Stage
@@ -153,7 +166,7 @@ const MainCanvas: React.FC = () => {
         scaleY={stageScale}
         x={stagePosition.x}
         y={stagePosition.y}
-        draggable={activeTool === 'pan'}
+        draggable={isDraggable}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
@@ -163,36 +176,34 @@ const MainCanvas: React.FC = () => {
         {/* Layer0: 原图层 */}
         <Layer>
           {originalImage && (
-            <KonvaImage
-              image={originalImage}
-              x={0}
-              y={0}
-            />
+            <KonvaImage image={originalImage} x={0} y={0} />
           )}
         </Layer>
 
-        {/* Layer2: Mask 结果层（在交互层下面，这样框选矩形在最上面） */}
-        <Layer opacity={0.6}>
+        {/* Layer2: Mask 结果层 */}
+        <Layer opacity={0.7}>
           {currentMaskUrls.map((url, idx) => (
             <MaskImage key={`${displayImageId}-mask-${idx}`} url={url} />
           ))}
         </Layer>
 
-        {/* Layer1: 交互层 — 框选矩形 */}
-        <Layer>
-          {bbox && bbox.width > 0 && bbox.height > 0 && (
-            <Rect
-              x={bbox.x}
-              y={bbox.y}
-              width={bbox.width}
-              height={bbox.height}
-              stroke="#1890ff"
-              strokeWidth={2 / stageScale}
-              dash={[6 / stageScale, 3 / stageScale]}
-              fill="rgba(24, 144, 255, 0.1)"
-            />
-          )}
-        </Layer>
+        {/* Layer1: 交互层 — 框选矩形（仅模式2） */}
+        {currentMode === 'mode2' && (
+          <Layer>
+            {bbox && bbox.width > 0 && bbox.height > 0 && (
+              <Rect
+                x={bbox.x}
+                y={bbox.y}
+                width={bbox.width}
+                height={bbox.height}
+                stroke="#1890ff"
+                strokeWidth={2 / stageScale}
+                dash={[6 / stageScale, 3 / stageScale]}
+                fill="rgba(24, 144, 255, 0.1)"
+              />
+            )}
+          </Layer>
+        )}
       </Stage>
 
       {/* 空状态提示 */}
@@ -209,10 +220,25 @@ const MainCanvas: React.FC = () => {
         }}>
           <p>请先上传图片</p>
           <p style={{ fontSize: 12, color: '#444' }}>
-            点击左侧上传按钮，或拖拽图片到此处
+            点击左侧「上传图片」按钮
           </p>
         </div>
       )}
+
+      {/* 模式提示角标 */}
+      <div style={{
+        position: 'absolute',
+        top: 8,
+        left: 8,
+        background: currentMode === 'mode1' ? 'rgba(0,120,255,0.8)' : 'rgba(255,77,79,0.8)',
+        color: '#fff',
+        padding: '2px 10px',
+        borderRadius: 4,
+        fontSize: 12,
+        pointerEvents: 'none',
+      }}>
+        {currentMode === 'mode1' ? '模式1：文本标注' : '模式2：框选标注'}
+      </div>
     </div>
   );
 };

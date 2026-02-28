@@ -36,6 +36,27 @@ class MaskConversionError(Exception):
         super().__init__(f"Mask conversion failed: {detail}")
 
 
+class EmptyTextPromptError(Exception):
+    """文本提示为空"""
+    def __init__(self):
+        super().__init__("Text prompt cannot be empty")
+
+
+class YOLODetectionError(Exception):
+    """YOLO-World 推理失败"""
+    def __init__(self, detail: str = ""):
+        self.detail = detail
+        super().__init__(f"YOLO-World detection failed: {detail}")
+
+
+class NoDetectionResultError(Exception):
+    """检测/匹配无结果"""
+    def __init__(self, mode: str = "", detail: str = ""):
+        self.mode = mode
+        self.detail = detail
+        super().__init__(f"No detection results ({mode}): {detail}")
+
+
 def register_exception_handlers(app):
     """
     注册全局异常处理器到 FastAPI 应用。
@@ -71,4 +92,25 @@ def register_exception_handlers(app):
         return JSONResponse(
             status_code=500,
             content={"error": "mask_conversion_failed", "detail": str(exc)},
+        )
+
+    @app.exception_handler(EmptyTextPromptError)
+    async def empty_text_handler(request: Request, exc: EmptyTextPromptError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "empty_text_prompt", "detail": str(exc)},
+        )
+
+    @app.exception_handler(YOLODetectionError)
+    async def yolo_detection_handler(request: Request, exc: YOLODetectionError):
+        return JSONResponse(
+            status_code=500,
+            content={"error": "yolo_detection_failed", "detail": str(exc)},
+        )
+
+    @app.exception_handler(NoDetectionResultError)
+    async def no_detection_handler(request: Request, exc: NoDetectionResultError):
+        return JSONResponse(
+            status_code=200,
+            content={"error": "no_detection_result", "detail": str(exc), "mode": exc.mode},
         )

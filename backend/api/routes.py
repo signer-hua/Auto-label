@@ -1,9 +1,12 @@
 """
 API 路由模块
-实现三个核心接口：
-    POST /upload          — 上传图像，存本地返回路径 + ID
-    POST /annotate/mode2  — 触发模式2异步批量标注
-    GET  /tasks/{task_id} — 查询 Redis 中任务状态/进度/Mask URL
+实现核心接口：
+    POST /upload          — 上传图像
+    GET  /images          — 获取图片列表
+    DELETE /images/{id}   — 删除图片
+    POST /annotate/mode1  — 模式1：文本提示标注（YOLO-World → SAM3）
+    POST /annotate/mode2  — 模式2：框选批量标注（SAM3 → DINOv3 → SAM3）
+    GET  /tasks/{task_id} — 查询任务状态/进度/Mask URL
 """
 import json
 import uuid
@@ -35,6 +38,13 @@ class UploadResponse(BaseModel):
     filename: str
     url: str
     path: str
+
+
+class Mode1Request(BaseModel):
+    """模式1 文本标注请求"""
+    text_prompt: str = Field(..., description="文本提示，如 'person, car, dog'")
+    image_ids: list[str] = Field(..., description="待标注图像 ID 列表")
+    image_paths: list[str] = Field(..., description="待标注图像路径列表")
 
 
 class Mode2Request(BaseModel):
@@ -137,6 +147,53 @@ async def delete_image(image_id: str):
 
     logger.info("Deleted image: %s", image_id)
     return {"message": "ok", "image_id": image_id}
+
+
+@router.post("/annotate/mode1")
+async def annotate_mode1(req: Mode1Request):
+    """
+    模式1：文本提示一键标注。
+
+    链路：文本提示 → YOLO-World 检测 bbox → SAM3 生成精准 Mask → 透明 PNG
+
+    接收文本提示 + 图片列表，调用 Celery 异步任务 process_text_annotation.delay()，
+    生成 task_id 并写入 Redis（状态 pending），立即返回 task_id。
+
+    响应时间 ≤ 100ms（仅触发异步任务，不执行推理）。
+    """
+    # 校验文本提示非空
+    text = req.text_prompt.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text prompt cannot be empty")
+
+    if len(req.image_ids) == 0:
+        raise HTTPException(status_code=400, detail="No images provided")
+
+    task_id = uuid.uuid4().hex
+
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending",
+        "progress": 0,
+        "total": len(req.image_ids),
+        "message": "Task queued, waiting for worker...",
+        "mode": "mode1",
+    })
+    r.expire(f"task:{task_id}", 86400)
+
+    # 触发 Celery 异步任务
+    from backend.worker import process_text_annotation
+    process_text_annotation.delay(
+        image_paths=req.image_paths,
+        image_ids=req.image_ids,
+        text_prompt=text,
+        task_id=task_id,
+    )
+
+    logger.info("Mode1 task created: %s (prompt='%s', images=%d)",
+                task_id, text, len(req.image_ids))
+
+    return {"task_id": task_id, "status": "pending", "mode": "mode1"}
 
 
 @router.post("/annotate/mode2")

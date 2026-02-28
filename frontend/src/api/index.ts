@@ -55,6 +55,19 @@ export async function uploadImages(files: File[]): Promise<UploadResponse[]> {
 }
 
 /**
+ * 触发模式1文本提示标注
+ * 链路：文本提示 → YOLO-World 检测 → SAM3 分割 → 透明 PNG
+ */
+export async function startMode1Annotation(params: {
+  text_prompt: string;
+  image_ids: string[];
+  image_paths: string[];
+}): Promise<{ task_id: string; status: string; mode: string }> {
+  const { data } = await api.post('/annotate/mode1', params);
+  return data;
+}
+
+/**
  * 触发模式2异步批量标注
  * 返回 task_id，后续通过 pollTaskStatus 轮询进度。
  */

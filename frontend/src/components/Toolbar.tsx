@@ -1,9 +1,13 @@
 /**
  * 左侧工具栏
- * 工具切换（框选/平移/缩放）、批量标注触发、重置。
+ * 功能：
+ *   - 模式切换（模式1 文本标注 / 模式2 框选批量标注）
+ *   - 模式1：文本输入框 + 一键标注按钮
+ *   - 模式2：框选/平移/缩放工具 + 批量标注按钮
+ *   - 通用：上传图片、重置任务
  */
 import React, { useCallback } from 'react';
-import { Button, Divider, Tooltip, Space, message } from 'antd';
+import { Button, Divider, Tooltip, Input, message, Radio, Space } from 'antd';
 import {
   SelectOutlined,
   DragOutlined,
@@ -11,12 +15,19 @@ import {
   PlayCircleOutlined,
   ClearOutlined,
   UploadOutlined,
+  FontSizeOutlined,
+  AimOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons';
-import { useAppStore, ToolType } from '../store/useAppStore';
-import { uploadImages, startMode2Annotation } from '../api';
+import { useAppStore, ToolType, AnnotationMode } from '../store/useAppStore';
+import { uploadImages, startMode1Annotation, startMode2Annotation } from '../api';
+
+const { TextArea } = Input;
 
 const Toolbar: React.FC = () => {
   const {
+    currentMode, setCurrentMode,
+    textPrompt, setTextPrompt,
     activeTool, setActiveTool,
     images, selectedImageId, bbox,
     taskStatus,
@@ -24,7 +35,9 @@ const Toolbar: React.FC = () => {
     setTask, resetTask,
   } = useAppStore();
 
-  /** 工具按钮配置 */
+  const isAnnotating = taskStatus === 'pending' || taskStatus === 'processing';
+
+  /** 工具按钮配置（模式2 使用） */
   const tools: { key: ToolType; icon: React.ReactNode; label: string }[] = [
     { key: 'select', icon: <SelectOutlined />, label: '框选工具' },
     { key: 'pan', icon: <DragOutlined />, label: '平移工具' },
@@ -51,7 +64,6 @@ const Toolbar: React.FC = () => {
           path: r.path,
         }));
         addImages(newImages);
-        // 自动选中第一张
         if (!selectedImageId && newImages.length > 0) {
           selectImage(newImages[0].id);
         }
@@ -63,8 +75,33 @@ const Toolbar: React.FC = () => {
     input.click();
   }, [addImages, selectImage, selectedImageId]);
 
-  /** 触发批量标注 */
-  const handleStartAnnotation = useCallback(async () => {
+  /** 模式1：文本提示一键标注 */
+  const handleMode1Annotate = useCallback(async () => {
+    const text = textPrompt.trim();
+    if (!text) {
+      message.warning('请输入文本提示（如：person, car, dog）');
+      return;
+    }
+    if (images.length === 0) {
+      message.warning('请先上传图片');
+      return;
+    }
+
+    try {
+      const result = await startMode1Annotation({
+        text_prompt: text,
+        image_ids: images.map((img) => img.id),
+        image_paths: images.map((img) => img.path),
+      });
+      setTask(result.task_id, 'pending');
+      message.info(`模式1 任务已提交（${images.length} 张图片，提示：${text}）`);
+    } catch (err: any) {
+      message.error(`标注失败：${err.message}`);
+    }
+  }, [textPrompt, images, setTask]);
+
+  /** 模式2：框选批量标注 */
+  const handleMode2Annotate = useCallback(async () => {
     if (!selectedImageId || !bbox) {
       message.warning('请先选择参考图并框选目标区域');
       return;
@@ -73,7 +110,6 @@ const Toolbar: React.FC = () => {
     const refImage = images.find((img) => img.id === selectedImageId);
     if (!refImage) return;
 
-    // 目标图 = 除参考图外的所有图
     const targetImages = images
       .filter((img) => img.id !== selectedImageId)
       .map((img) => ({ id: img.id, path: img.path }));
@@ -84,7 +120,6 @@ const Toolbar: React.FC = () => {
     }
 
     try {
-      // bbox 转为 [x1, y1, x2, y2]
       const bboxCoords: [number, number, number, number] = [
         bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height,
       ];
@@ -97,83 +132,137 @@ const Toolbar: React.FC = () => {
       });
 
       setTask(result.task_id, 'pending');
-      message.info(`任务已提交 (${targetImages.length} 张待标注)`);
+      message.info(`模式2 任务已提交（${targetImages.length} 张待标注）`);
     } catch (err: any) {
       message.error(`标注失败：${err.message}`);
     }
   }, [selectedImageId, bbox, images, setTask]);
 
-  const isAnnotating = taskStatus === 'pending' || taskStatus === 'processing';
-
   return (
     <div style={{
-      width: 64,
+      width: 220,
       background: '#1f1f1f',
       display: 'flex',
       flexDirection: 'column',
-      alignItems: 'center',
-      padding: '12px 0',
-      gap: 4,
+      padding: '12px',
+      gap: 8,
+      borderRight: '1px solid #333',
+      overflow: 'auto',
     }}>
       {/* 上传按钮 */}
-      <Tooltip title="上传图片" placement="right">
-        <Button
-          type="text"
-          icon={<UploadOutlined style={{ color: '#fff', fontSize: 20 }} />}
-          onClick={handleUpload}
-          style={{ width: 48, height: 48 }}
-        />
-      </Tooltip>
+      <Button
+        icon={<UploadOutlined />}
+        onClick={handleUpload}
+        block
+        style={{ marginBottom: 4 }}
+      >
+        上传图片
+      </Button>
 
-      <Divider style={{ margin: '8px 0', borderColor: '#444', minWidth: 40 }} />
+      <Divider style={{ margin: '4px 0', borderColor: '#444' }} />
 
-      {/* 工具按钮 */}
-      {tools.map((tool) => (
-        <Tooltip key={tool.key} title={tool.label} placement="right">
-          <Button
-            type="text"
-            icon={React.cloneElement(tool.icon as React.ReactElement, {
-              style: {
-                color: activeTool === tool.key ? '#1890ff' : '#aaa',
-                fontSize: 20,
-              },
-            })}
-            onClick={() => setActiveTool(tool.key)}
-            style={{
-              width: 48,
-              height: 48,
-              background: activeTool === tool.key ? '#333' : 'transparent',
-              borderRadius: 8,
-            }}
+      {/* 模式切换 */}
+      <div style={{ color: '#999', fontSize: 12, marginBottom: 4 }}>标注模式</div>
+      <Radio.Group
+        value={currentMode}
+        onChange={(e) => setCurrentMode(e.target.value as AnnotationMode)}
+        buttonStyle="solid"
+        size="small"
+        style={{ width: '100%' }}
+      >
+        <Radio.Button value="mode1" style={{ width: '50%', textAlign: 'center' }}>
+          <FontSizeOutlined /> 文本
+        </Radio.Button>
+        <Radio.Button value="mode2" style={{ width: '50%', textAlign: 'center' }}>
+          <AimOutlined /> 框选
+        </Radio.Button>
+      </Radio.Group>
+
+      <Divider style={{ margin: '4px 0', borderColor: '#444' }} />
+
+      {/* ===== 模式1：文本标注 ===== */}
+      {currentMode === 'mode1' && (
+        <>
+          <div style={{ color: '#999', fontSize: 12 }}>
+            文本提示（逗号分隔多个类别）
+          </div>
+          <TextArea
+            value={textPrompt}
+            onChange={(e) => setTextPrompt(e.target.value)}
+            placeholder="例如：person, car, dog"
+            autoSize={{ minRows: 2, maxRows: 4 }}
+            style={{ background: '#2a2a2a', borderColor: '#444', color: '#ddd' }}
           />
-        </Tooltip>
-      ))}
+          <Button
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            onClick={handleMode1Annotate}
+            disabled={isAnnotating}
+            loading={isAnnotating}
+            block
+          >
+            {isAnnotating ? '标注中...' : '一键标注'}
+          </Button>
+          <div style={{ color: '#666', fontSize: 11 }}>
+            YOLO-World 检测 → SAM3 精准分割
+          </div>
+        </>
+      )}
 
-      <Divider style={{ margin: '8px 0', borderColor: '#444', minWidth: 40 }} />
+      {/* ===== 模式2：框选批量标注 ===== */}
+      {currentMode === 'mode2' && (
+        <>
+          <div style={{ color: '#999', fontSize: 12, marginBottom: 4 }}>画布工具</div>
+          <Space wrap>
+            {tools.map((tool) => (
+              <Tooltip key={tool.key} title={tool.label}>
+                <Button
+                  type={activeTool === tool.key ? 'primary' : 'default'}
+                  icon={tool.icon}
+                  onClick={() => setActiveTool(tool.key)}
+                  size="small"
+                />
+              </Tooltip>
+            ))}
+          </Space>
 
-      {/* 批量标注按钮 */}
-      <Tooltip title="批量标注" placement="right">
-        <Button
-          type="text"
-          icon={<PlayCircleOutlined style={{
-            color: isAnnotating ? '#faad14' : '#52c41a',
-            fontSize: 22,
-          }} />}
-          onClick={handleStartAnnotation}
-          disabled={isAnnotating}
-          style={{ width: 48, height: 48 }}
-        />
-      </Tooltip>
+          {/* bbox 坐标显示 */}
+          {bbox && bbox.width > 0 && (
+            <div style={{ color: '#999', fontSize: 11, marginTop: 4 }}>
+              框选: [{Math.round(bbox.x)}, {Math.round(bbox.y)}] →
+              [{Math.round(bbox.x + bbox.width)}, {Math.round(bbox.y + bbox.height)}]
+            </div>
+          )}
 
-      {/* 重置 */}
-      <Tooltip title="重置任务" placement="right">
-        <Button
-          type="text"
-          icon={<ClearOutlined style={{ color: '#aaa', fontSize: 18 }} />}
-          onClick={resetTask}
-          style={{ width: 48, height: 48 }}
-        />
-      </Tooltip>
+          <Button
+            type="primary"
+            icon={<PlayCircleOutlined />}
+            onClick={handleMode2Annotate}
+            disabled={isAnnotating || !bbox}
+            loading={isAnnotating}
+            block
+            style={{ marginTop: 4 }}
+          >
+            {isAnnotating ? '标注中...' : '批量标注'}
+          </Button>
+          <div style={{ color: '#666', fontSize: 11 }}>
+            SAM3 分割 → DINOv3 匹配 → 批量 SAM3
+          </div>
+        </>
+      )}
+
+      {/* 底部：重置 */}
+      <div style={{ flex: 1 }} />
+      <Divider style={{ margin: '4px 0', borderColor: '#444' }} />
+      <Button
+        icon={<ClearOutlined />}
+        onClick={resetTask}
+        block
+        size="small"
+        danger
+      >
+        重置任务
+      </Button>
     </div>
   );
 };

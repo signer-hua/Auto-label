@@ -1,8 +1,8 @@
 /**
  * Zustand 全局状态管理
  *
- * 管理：上传图片列表、当前选中图片、框选坐标、
- *       task_id、任务状态、进度、Mask URL 映射表。
+ * 管理：标注模式（mode1/mode2）、文本提示、上传图片列表、
+ *       当前选中图片、框选坐标、task_id、任务状态、进度、Mask URL 映射表。
  */
 import { create } from 'zustand';
 
@@ -25,14 +25,21 @@ export interface BBox {
 /** 工具类型 */
 export type ToolType = 'select' | 'pan' | 'zoom';
 
+/** 标注模式 */
+export type AnnotationMode = 'mode1' | 'mode2';
+
 /** 任务状态 */
 export type TaskStatus = 'idle' | 'pending' | 'processing' | 'success' | 'failed';
 
 /** 全局状态 */
 interface AppState {
+  // ===== 标注模式 =====
+  currentMode: AnnotationMode;            // 当前标注模式
+  textPrompt: string;                     // 模式1 文本提示
+
   // ===== 图片管理 =====
   images: ImageItem[];                    // 已上传图片列表
-  selectedImageId: string | null;         // 当前选中的图片 ID（左侧主画布显示）
+  selectedImageId: string | null;         // 当前选中的图片 ID（参考图 / 主画布显示）
   viewingImageId: string | null;          // 右侧面板正在查看的图片 ID
 
   // ===== 交互工具 =====
@@ -56,6 +63,8 @@ interface AppState {
   stagePosition: { x: number; y: number }; // 平移偏移
 
   // ===== Actions =====
+  setCurrentMode: (mode: AnnotationMode) => void;
+  setTextPrompt: (text: string) => void;
   addImage: (img: ImageItem) => void;
   addImages: (imgs: ImageItem[]) => void;
   setImages: (imgs: ImageItem[]) => void;
@@ -77,6 +86,8 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set) => ({
   // 初始状态
+  currentMode: 'mode1',
+  textPrompt: '',
   images: [],
   selectedImageId: null,
   viewingImageId: null,
@@ -94,6 +105,12 @@ export const useAppStore = create<AppState>((set) => ({
   stagePosition: { x: 0, y: 0 },
 
   // Actions
+  setCurrentMode: (mode) =>
+    set({ currentMode: mode, bbox: null }),
+
+  setTextPrompt: (text) =>
+    set({ textPrompt: text }),
+
   addImage: (img) =>
     set((s) => ({ images: [...s.images, img] })),
 
@@ -107,7 +124,6 @@ export const useAppStore = create<AppState>((set) => ({
     set((s) => {
       const images = s.images.filter((img) => img.id !== id);
       const updates: Partial<AppState> = { images };
-      // 如果删除的是当前选中/查看的图片，清除选中状态
       if (s.selectedImageId === id) updates.selectedImageId = images[0]?.id || null;
       if (s.viewingImageId === id) updates.viewingImageId = null;
       return updates;

@@ -43,14 +43,29 @@ SAM3_DEVICE = os.getenv("SAM3_DEVICE", "cuda")
 DINO_MODEL_NAME = os.getenv("DINO_MODEL_NAME", "dinov3_vits16")
 DINO_DEVICE = os.getenv("DINO_DEVICE", "cuda")
 
+# YOLO-World
+YOLOWORLD_CONFIG = os.getenv(
+    "YOLOWORLD_CONFIG",
+    str(LIBS_ROOT / "yolo_world" / "configs" / "pretrain" /
+        "yolo_world_v2_s_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py"),
+)
+YOLOWORLD_WEIGHTS = os.getenv("YOLOWORLD_WEIGHTS", "")  # 需手动下载并指定路径
+YOLOWORLD_DEVICE = os.getenv("YOLOWORLD_DEVICE", "cuda")
+YOLOWORLD_SCORE_THR = float(os.getenv("YOLOWORLD_SCORE_THR", "0.3"))  # 文本检测置信度阈值
+YOLOWORLD_NMS_THR = float(os.getenv("YOLOWORLD_NMS_THR", "0.7"))     # NMS IoU 阈值
+
 # ==================== 标注参数 ====================
 # 余弦相似度阈值（模式2 特征匹配）
 COSINE_SIMILARITY_THRESHOLD = float(os.getenv("COSINE_THRESHOLD", "0.75"))
-# Mask 透明 PNG 颜色配置
-MASK_COLOR_R = 255   # 红色通道
-MASK_COLOR_G = 0     # 绿色通道
-MASK_COLOR_B = 0     # 蓝色通道
-MASK_ALPHA = 128     # Alpha 通道（半透明）
+# Mask 透明 PNG 颜色配置（模式2：红色）
+MASK_COLOR_R = 255
+MASK_COLOR_G = 0
+MASK_COLOR_B = 0
+MASK_ALPHA = 128
+
+# 模式1 Mask 颜色（蓝色，与模式2 视觉区分）
+MASK_MODE1_COLOR = (0, 120, 255)
+MASK_MODE1_ALPHA = 140
 
 # ==================== 服务器配置 ====================
 API_HOST = os.getenv("API_HOST", "0.0.0.0")

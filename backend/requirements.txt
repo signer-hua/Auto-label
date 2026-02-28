@@ -31,8 +31,14 @@ huggingface_hub
 tqdm
 typing_extensions
 
-# ==================== YOLO-World 依赖（可选，模式1 使用） ====================
-# 安装方式：pip install openmim && mim install mmcv==2.0.0
-# mmengine>=0.10.3
-# mmdet>=3.0.0
-# transformers>=4.36.0
+# ==================== YOLO-World 依赖 ====================
+# 安装方式（必须按顺序）：
+#   pip install openmim
+#   mim install mmengine
+#   mim install mmcv==2.0.0
+#   mim install mmdet>=3.0.0
+# 然后安装内置库：
+#   pip install -e backend/libs/yolo_world
+mmengine>=0.10.3
+mmdet>=3.0.0
+transformers>=4.36.0
