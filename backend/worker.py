@@ -186,12 +186,23 @@ def process_batch_annotation(
                         task_id, idx + 1, total, elapsed, len(image_mask_urls))
 
         # ========== Step 4: 保存 COCO 导出 ==========
+        # 构建 images 列表（填充实际 width/height）
+        coco_images = []
+        for img_path, img_id in zip(target_image_paths, target_image_ids):
+            try:
+                with Image.open(img_path) as _img:
+                    w, h = _img.size
+            except Exception:
+                w, h = 0, 0
+            coco_images.append({
+                "id": img_id,
+                "file_name": Path(img_path).name,
+                "width": w,
+                "height": h,
+            })
+
         coco_result = {
-            "images": [
-                {"id": img_id, "file_name": Path(img_path).name,
-                 "width": 0, "height": 0}  # 简化，实际可填充
-                for img_path, img_id in zip(target_image_paths, target_image_ids)
-            ],
+            "images": coco_images,
             "annotations": coco_annotations,
             "categories": [{"id": 1, "name": "target", "supercategory": "object"}],
         }

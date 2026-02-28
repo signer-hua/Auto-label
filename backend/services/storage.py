@@ -47,28 +47,17 @@ def get_mask_path(image_id: str, instance_idx: int = 0) -> Path:
 
 def get_image_url(image_id: str, ext: str = ".jpg") -> str:
     """
-    获取图像的 HTTP 访问 URL。
-
-    Args:
-        image_id: 图像 ID
-        ext: 文件扩展名
-    Returns:
-        完整 URL 字符串
+    获取图像的相对 URL（前端通过 Vite proxy 或 Nginx 代理访问）。
+    使用相对路径，避免硬编码 host:port。
     """
-    return f"{STATIC_URL_PREFIX}/data/images/{image_id}{ext}"
+    return f"/data/images/{image_id}{ext}"
 
 
 def get_mask_url(image_id: str, instance_idx: int = 0) -> str:
     """
-    获取 Mask PNG 的 HTTP 访问 URL。
-
-    Args:
-        image_id: 图像 ID
-        instance_idx: 实例索引
-    Returns:
-        完整 URL 字符串
+    获取 Mask PNG 的相对 URL。
     """
-    return f"{STATIC_URL_PREFIX}/data/masks/{image_id}_mask_{instance_idx}.png"
+    return f"/data/masks/{image_id}_mask_{instance_idx}.png"
 
 
 async def save_upload_file(file: UploadFile) -> tuple[str, str, Path]:
@@ -103,5 +92,5 @@ def get_export_path(task_id: str) -> Path:
 
 
 def get_export_url(task_id: str) -> str:
-    """获取 COCO 导出文件 URL"""
-    return f"{STATIC_URL_PREFIX}/data/exports/{task_id}_coco.json"
+    """获取 COCO 导出文件相对 URL"""
+    return f"/data/exports/{task_id}_coco.json"

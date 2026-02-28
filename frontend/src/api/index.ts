@@ -76,4 +76,19 @@ export async function getTaskStatus(taskId: string): Promise<TaskStatusResponse>
   return data;
 }
 
+/**
+ * 获取已上传的图片列表（页面刷新后恢复）
+ */
+export async function listImages(): Promise<UploadResponse[]> {
+  const { data } = await api.get<{ images: UploadResponse[]; count: number }>('/images');
+  return data.images;
+}
+
+/**
+ * 删除指定图片
+ */
+export async function deleteImage(imageId: string): Promise<void> {
+  await api.delete(`/images/${imageId}`);
+}
+
 export default api;

@@ -58,6 +58,8 @@ interface AppState {
   // ===== Actions =====
   addImage: (img: ImageItem) => void;
   addImages: (imgs: ImageItem[]) => void;
+  setImages: (imgs: ImageItem[]) => void;
+  removeImage: (id: string) => void;
   selectImage: (id: string | null) => void;
   setViewingImage: (id: string | null) => void;
   setActiveTool: (tool: ToolType) => void;
@@ -97,6 +99,19 @@ export const useAppStore = create<AppState>((set) => ({
 
   addImages: (imgs) =>
     set((s) => ({ images: [...s.images, ...imgs] })),
+
+  setImages: (imgs) =>
+    set({ images: imgs }),
+
+  removeImage: (id) =>
+    set((s) => {
+      const images = s.images.filter((img) => img.id !== id);
+      const updates: Partial<AppState> = { images };
+      // 如果删除的是当前选中/查看的图片，清除选中状态
+      if (s.selectedImageId === id) updates.selectedImageId = images[0]?.id || null;
+      if (s.viewingImageId === id) updates.viewingImageId = null;
+      return updates;
+    }),
 
   selectImage: (id) =>
     set({ selectedImageId: id, bbox: null }),

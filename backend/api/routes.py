@@ -14,7 +14,7 @@ import redis
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.core.config import REDIS_URL
+from backend.core.config import REDIS_URL, IMAGE_DIR
 from backend.core.exceptions import TaskNotFoundError, FileUploadError
 from backend.services.storage import save_upload_file, get_image_url
 
@@ -89,6 +89,54 @@ async def upload_image(file: UploadFile = File(...)):
     except Exception as e:
         logger.exception("Upload failed: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@router.get("/images")
+async def list_images():
+    """
+    获取已上传的图片列表。
+    扫描 /data/images/ 目录，返回所有图片信息。
+    """
+    images = []
+    if IMAGE_DIR.exists():
+        for f in sorted(IMAGE_DIR.iterdir()):
+            if f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}:
+                image_id = f.stem
+                images.append({
+                    "image_id": image_id,
+                    "filename": f.name,
+                    "url": get_image_url(image_id, f.suffix),
+                    "path": str(f),
+                })
+    return {"images": images, "count": len(images)}
+
+
+@router.delete("/images/{image_id}")
+async def delete_image(image_id: str):
+    """
+    删除指定图片及其关联的 Mask 文件。
+    """
+    from backend.core.config import MASK_DIR
+
+    # 查找并删除原图
+    deleted = False
+    for f in IMAGE_DIR.iterdir():
+        if f.stem == image_id:
+            f.unlink()
+            deleted = True
+            break
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Image not found: {image_id}")
+
+    # 删除关联的 Mask 文件
+    if MASK_DIR.exists():
+        for mask_file in MASK_DIR.iterdir():
+            if mask_file.name.startswith(image_id):
+                mask_file.unlink()
+
+    logger.info("Deleted image: %s", image_id)
+    return {"message": "ok", "image_id": image_id}
 
 
 @router.post("/annotate/mode2")

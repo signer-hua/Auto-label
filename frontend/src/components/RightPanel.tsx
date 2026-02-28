@@ -1,13 +1,18 @@
 /**
  * 右侧面板
- * 包含：图片列表缩略图、批量进度条、一键导出按钮。
- * 点击缩略图切换查看对应图片的 Mask 结果。
+ * 包含：图片列表缩略图（含删除/设为参考图）、批量进度条、一键导出按钮。
  */
 import React, { useEffect, useRef, useCallback } from 'react';
-import { Card, Progress, Button, List, Tag, Typography, message, Empty } from 'antd';
-import { DownloadOutlined, CheckCircleOutlined, LoadingOutlined } from '@ant-design/icons';
+import { Card, Progress, Button, Tag, Typography, message, Empty, Popconfirm } from 'antd';
+import {
+  DownloadOutlined,
+  CheckCircleOutlined,
+  DeleteOutlined,
+  StarOutlined,
+  StarFilled,
+} from '@ant-design/icons';
 import { useAppStore } from '../store/useAppStore';
-import { getTaskStatus } from '../api';
+import { getTaskStatus, deleteImage, listImages } from '../api';
 
 const { Text } = Typography;
 
@@ -16,30 +21,50 @@ const RightPanel: React.FC = () => {
     images, selectedImageId, viewingImageId,
     taskId, taskStatus, taskProgress, taskTotal, taskMessage,
     maskUrls, exportUrl,
-    selectImage, setViewingImage,
+    selectImage, setViewingImage, removeImage, setImages, addImages,
     updateTaskProgress, setTaskStatus, setMaskUrls, setExportUrl,
   } = useAppStore();
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const initRef = useRef(false);
+
+  // ==================== 页面加载时恢复图片列表 ====================
+  useEffect(() => {
+    if (initRef.current) return;
+    initRef.current = true;
+
+    listImages()
+      .then((serverImages) => {
+        if (serverImages.length > 0 && images.length === 0) {
+          const items = serverImages.map((img) => ({
+            id: img.image_id,
+            filename: img.filename,
+            url: img.url,
+            path: img.path,
+          }));
+          addImages(items);
+          selectImage(items[0].id);
+        }
+      })
+      .catch(() => {
+        // 后端未启动时静默忽略
+      });
+  }, []);
 
   // ==================== 任务状态轮询 ====================
   useEffect(() => {
-    // 清除旧的轮询
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
 
-    // 只在 pending/processing 状态下轮询
     if (!taskId || (taskStatus !== 'pending' && taskStatus !== 'processing')) {
       return;
     }
 
-    // 每 1 秒轮询一次
     pollRef.current = setInterval(async () => {
       try {
         const res = await getTaskStatus(taskId);
-
         updateTaskProgress(res.progress, res.total, res.message);
 
         if (res.status === 'success') {
@@ -47,7 +72,6 @@ const RightPanel: React.FC = () => {
           if (res.mask_urls) setMaskUrls(res.mask_urls);
           if (res.export_url) setExportUrl(res.export_url);
           message.success('批量标注完成！');
-          // 停止轮询
           if (pollRef.current) clearInterval(pollRef.current);
         } else if (res.status === 'failed') {
           setTaskStatus('failed', res.message);
@@ -64,6 +88,25 @@ const RightPanel: React.FC = () => {
     };
   }, [taskId, taskStatus]);
 
+  /** 删除图片 */
+  const handleDelete = useCallback(async (imageId: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // 阻止触发点击选中
+    try {
+      await deleteImage(imageId);
+      removeImage(imageId);
+      message.success('已删除');
+    } catch (err: any) {
+      message.error(`删除失败：${err.message}`);
+    }
+  }, [removeImage]);
+
+  /** 设为参考图 */
+  const handleSetRef = useCallback((imageId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    selectImage(imageId);
+    message.info('已设为参考图');
+  }, [selectImage]);
+
   /** 下载 COCO 导出 */
   const handleExport = useCallback(() => {
     if (exportUrl) {
@@ -71,16 +114,10 @@ const RightPanel: React.FC = () => {
     }
   }, [exportUrl]);
 
-  /** 进度百分比 */
   const progressPercent = taskTotal > 0 ? Math.round((taskProgress / taskTotal) * 100) : 0;
 
-  /** 状态标签颜色 */
   const statusColor: Record<string, string> = {
-    idle: 'default',
-    pending: 'orange',
-    processing: 'blue',
-    success: 'green',
-    failed: 'red',
+    idle: 'default', pending: 'orange', processing: 'blue', success: 'green', failed: 'red',
   };
 
   return (
@@ -115,7 +152,6 @@ const RightPanel: React.FC = () => {
           </>
         )}
 
-        {/* 导出按钮 */}
         {taskStatus === 'success' && exportUrl && (
           <Button
             type="primary"
@@ -141,62 +177,99 @@ const RightPanel: React.FC = () => {
             image={Empty.PRESENTED_IMAGE_SIMPLE}
           />
         ) : (
-          <List
-            dataSource={images}
-            renderItem={(img) => {
-              const isRef = img.id === selectedImageId;
-              const isViewing = img.id === viewingImageId;
-              const hasMask = (maskUrls[img.id] || []).length > 0;
+          images.map((img) => {
+            const isRef = img.id === selectedImageId;
+            const isViewing = img.id === viewingImageId;
+            const hasMask = (maskUrls[img.id] || []).length > 0;
 
-              return (
-                <div
-                  key={img.id}
-                  onClick={() => setViewingImage(img.id)}
+            return (
+              <div
+                key={img.id}
+                onClick={() => setViewingImage(img.id)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 8px',
+                  marginBottom: 4,
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  background: isViewing ? '#333' : 'transparent',
+                  border: isRef ? '1px solid #1890ff' : '1px solid transparent',
+                  position: 'relative',
+                }}
+              >
+                {/* 缩略图 */}
+                <img
+                  src={img.url}
+                  alt={img.filename}
                   style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '6px 8px',
-                    marginBottom: 4,
-                    borderRadius: 6,
-                    cursor: 'pointer',
-                    background: isViewing ? '#333' : 'transparent',
-                    border: isRef ? '1px solid #1890ff' : '1px solid transparent',
+                    width: 48,
+                    height: 48,
+                    objectFit: 'cover',
+                    borderRadius: 4,
+                    flexShrink: 0,
                   }}
-                >
-                  {/* 缩略图 */}
-                  <img
-                    src={img.url}
-                    alt={img.filename}
-                    style={{
-                      width: 48,
-                      height: 48,
-                      objectFit: 'cover',
-                      borderRadius: 4,
-                    }}
-                  />
+                />
 
-                  {/* 文件名 + 标签 */}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <Text
-                      ellipsis
-                      style={{ color: '#ddd', fontSize: 12, display: 'block' }}
-                    >
-                      {img.filename}
-                    </Text>
-                    <div style={{ display: 'flex', gap: 4, marginTop: 2 }}>
-                      {isRef && <Tag color="blue" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>参考图</Tag>}
-                      {hasMask && (
-                        <Tag color="green" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>
-                          <CheckCircleOutlined /> {maskUrls[img.id].length}
-                        </Tag>
-                      )}
-                    </div>
+                {/* 文件名 + 标签 */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <Text
+                    ellipsis
+                    style={{ color: '#ddd', fontSize: 12, display: 'block' }}
+                  >
+                    {img.filename}
+                  </Text>
+                  <div style={{ display: 'flex', gap: 4, marginTop: 2, flexWrap: 'wrap' }}>
+                    {isRef && (
+                      <Tag color="blue" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>
+                        参考图
+                      </Tag>
+                    )}
+                    {hasMask && (
+                      <Tag color="green" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>
+                        <CheckCircleOutlined /> {maskUrls[img.id].length}
+                      </Tag>
+                    )}
                   </div>
                 </div>
-              );
-            }}
-          />
+
+                {/* 操作按钮 */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flexShrink: 0 }}>
+                  {/* 设为参考图 */}
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={isRef
+                      ? <StarFilled style={{ color: '#faad14', fontSize: 14 }} />
+                      : <StarOutlined style={{ color: '#666', fontSize: 14 }} />
+                    }
+                    onClick={(e) => handleSetRef(img.id, e)}
+                    title="设为参考图"
+                    style={{ width: 24, height: 24, padding: 0, minWidth: 24 }}
+                  />
+                  {/* 删除 */}
+                  <Popconfirm
+                    title="确定删除此图片？"
+                    onConfirm={(e) => handleDelete(img.id, e as any)}
+                    okText="删除"
+                    cancelText="取消"
+                    placement="left"
+                  >
+                    <Button
+                      type="text"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined style={{ fontSize: 14 }} />}
+                      onClick={(e) => e.stopPropagation()}
+                      title="删除图片"
+                      style={{ width: 24, height: 24, padding: 0, minWidth: 24 }}
+                    />
+                  </Popconfirm>
+                </div>
+              </div>
+            );
+          })
         )}
       </div>
     </div>
