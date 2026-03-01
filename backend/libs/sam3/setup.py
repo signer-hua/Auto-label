@@ -17,5 +17,6 @@ setup(
         "regex",
         "numpy>=1.26,<2",
         "typing_extensions",
+        "pycocotools",
     ],
 )
