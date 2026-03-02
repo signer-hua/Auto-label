@@ -107,7 +107,7 @@ def _handle_gpu_oom(r, task_id: str, e: Exception):
 def warmup_models(**kwargs):
     """
     Celery Worker 进程启动时自动调用。
-    预热 SAM3、DINOv3、YOLO-World 三个模型到 GPU (half precision)。
+    预热 SAM3、DINOv3、Grounding DINO 三个模型到 GPU (half precision)。
     """
     logger.info("=" * 60)
     logger.info("[Worker] Warming up all models...")

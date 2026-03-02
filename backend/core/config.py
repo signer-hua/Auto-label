@@ -14,6 +14,9 @@ BACKEND_ROOT = Path(__file__).parent.parent
 # 内置算法库根目录
 LIBS_ROOT = BACKEND_ROOT / "libs"
 
+# 权重文件目录（默认在项目同级的 weights/ 目录下）
+WEIGHTS_DIR = Path(os.getenv("WEIGHTS_DIR", str(PROJECT_ROOT.parent / "weights")))
+
 # 数据存储目录
 DATA_DIR = PROJECT_ROOT / "data"
 IMAGE_DIR = DATA_DIR / "images"       # 上传的原始图像
@@ -36,23 +39,23 @@ CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL)
 
 # ==================== 模型配置 ====================
 # SAM3
-SAM3_CHECKPOINT = os.getenv("SAM3_CHECKPOINT", "")  # 留空自动从 HuggingFace 下载
+# 本地权重路径：设置为 weights/sam3.pt 则从本地加载，留空则自动从 HuggingFace 下载
+SAM3_CHECKPOINT = os.getenv("SAM3_CHECKPOINT", str(WEIGHTS_DIR / "sam3.pt"))
 SAM3_DEVICE = os.getenv("SAM3_DEVICE", "cuda")
 
 # DINOv3
 DINO_MODEL_NAME = os.getenv("DINO_MODEL_NAME", "dinov3_vits16")
 DINO_DEVICE = os.getenv("DINO_DEVICE", "cuda")
+# DINOv3 本地权重路径（如 weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth）
+DINO_WEIGHTS_PATH = os.getenv("DINO_WEIGHTS_PATH", str(WEIGHTS_DIR / "dinov3_vits16_pretrain_lvd1689m-08c60483.pth"))
 
-# Grounding DINO（替代原 YOLO-World，使用 transformers 库加载，无 MM 系列依赖）
+# Grounding DINO（使用 transformers 库加载，无 MM 系列依赖）
+# 可以是 HuggingFace Hub 模型名称，也可以是本地目录路径
 GROUNDING_DINO_MODEL_NAME = os.getenv("GROUNDING_DINO_MODEL_NAME", "IDEA-Research/grounding-dino-base")
 GROUNDING_DINO_DEVICE = os.getenv("GROUNDING_DINO_DEVICE", "cuda")
 GROUNDING_DINO_SCORE_THR = float(os.getenv("GROUNDING_DINO_SCORE_THR", "0.3"))
 GROUNDING_DINO_BOX_THR = float(os.getenv("GROUNDING_DINO_BOX_THR", "0.3"))
 GROUNDING_DINO_SCORE_THR_LOW = float(os.getenv("GROUNDING_DINO_SCORE_THR_LOW", "0.2"))
-
-# 兼容性别名：原 YOLO-World 阈值变量名映射到 Grounding DINO，避免修改其他代码逻辑
-YOLOWORLD_SCORE_THR = GROUNDING_DINO_SCORE_THR
-YOLOWORLD_SCORE_THR_LOW = GROUNDING_DINO_SCORE_THR_LOW
 
 # ==================== 标注参数 ====================
 # 余弦相似度阈值（模式2 特征匹配）
@@ -71,7 +74,7 @@ MASK_MODE1_ALPHA = 140
 MASK_MODE3_COLOR = (0, 255, 0)
 MASK_MODE3_ALPHA = 130
 
-# 模式1 多类别颜色调色板（最多 20 个类别循环使用）
+# 模式1 多类别颜色调色板（最多 10 个类别循环使用）
 MODE1_CATEGORY_COLORS = [
     (0, 120, 255),   # 蓝色
     (255, 200, 0),   # 黄色
@@ -87,9 +90,6 @@ MODE1_CATEGORY_COLORS = [
 
 # ==================== DINOv3 聚类参数（模式3） ====================
 DINO_CLUSTER_NUM = int(os.getenv("DINO_CLUSTER_NUM", "8"))  # K-Means 聚类数
-
-# ==================== Grounding DINO 低阈值（重试用） ====================
-# 已在 Grounding DINO 配置中定义 GROUNDING_DINO_SCORE_THR_LOW，此处保留兼容别名
 
 # ==================== Redis 任务过期时间 ====================
 REDIS_TASK_EXPIRE = int(os.getenv("REDIS_TASK_EXPIRE", "86400"))  # 默认 24 小时

@@ -151,7 +151,7 @@ async def delete_image(image_id: str):
 
 @router.post("/annotate/mode1")
 async def annotate_mode1(req: Mode1Request):
-    """模式1：文本 → YOLO-World → SAM3 → 蓝色 Mask PNG"""
+    """模式1：文本 → Grounding DINO → SAM3 → Mask PNG"""
     text = req.text_prompt.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text prompt cannot be empty")

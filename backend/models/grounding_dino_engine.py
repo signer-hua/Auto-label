@@ -1,6 +1,6 @@
 """
 Grounding DINO 单例引擎
-负责：基于文本提示的开放词汇目标检测（替代原 YOLO-World）。
+负责：基于文本提示的开放词汇目标检测。
 采用 HuggingFace transformers 库加载模型，无需 MMDetection/MMEngine 依赖。
 单例模式，Celery Worker 启动时预热加载到 GPU (float16)。
 
@@ -11,10 +11,10 @@ Grounding DINO 单例引擎
 
 链路位置：模式1 第一步 —— 文本提示 → Grounding DINO 检测 bbox → SAM3 生成 Mask
 
-与原 YOLO-World 的适配点：
-    - 输出格式完全一致：[{"box": [x1,y1,x2,y2], "label": str, "score": float, "label_id": int}]
-    - 文本提示用 " . " 分隔（Grounding DINO 规范），自动处理中英文标点
-    - label_id 从 0 开始编号（与原 YOLO-World 保持一致，COCO 中 category_id = label_id + 1）
+输出格式：
+    [{"box": [x1,y1,x2,y2], "label": str, "score": float, "label_id": int}]
+    文本提示用 " . " 分隔（Grounding DINO 规范），自动处理中英文标点
+    label_id 从 0 开始编号（COCO 中 category_id = label_id + 1）
 """
 import re
 import gc
@@ -41,7 +41,7 @@ class GroundingDINOEngine:
         engine.warmup()
         detections = engine.detect(image, ["person", "car", "dog"])
 
-    输出格式（与原 YOLO-World 完全一致）：
+    输出格式：
         [{"box": [x1,y1,x2,y2], "label": "person", "score": 0.92, "label_id": 0}, ...]
     """
 
@@ -68,8 +68,8 @@ class GroundingDINOEngine:
         预热模型：加载 Grounding DINO 到 GPU，转为 float16 半精度。
         应在 Celery Worker 启动时调用一次。
 
-        使用 transformers 库的 AutoProcessor + AutoModelForZeroShotObjectDetection，
-        无需手动下载权重/配置文件，首次运行自动从 HuggingFace Hub 下载。
+        model_name 可以是 HuggingFace Hub 名称（如 IDEA-Research/grounding-dino-base），
+        也可以是本地已下载的模型目录路径。首次使用 Hub 名称时会自动下载权重。
         """
         if self._warmed_up:
             return
@@ -130,7 +130,7 @@ class GroundingDINOEngine:
             score_thr: 置信度阈值，None 则使用默认配置
 
         Returns:
-            detections: 列表，每个元素（与原 YOLO-World 输出格式完全一致）：
+            detections: 列表，每个元素：
                 {
                     "box": [x1, y1, x2, y2],  # 像素坐标（浮点数，保留4位小数）
                     "label": "person",          # 文本标签
@@ -153,13 +153,11 @@ class GroundingDINOEngine:
         inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                   for k, v in inputs.items()}
 
-        # 半精度推理
         if 'pixel_values' in inputs:
             inputs['pixel_values'] = inputs['pixel_values'].half()
 
         outputs = self.model(**inputs)
 
-        # 后处理：转换为像素坐标并过滤
         results = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs["input_ids"],
@@ -180,7 +178,6 @@ class GroundingDINOEngine:
             if det_score < threshold:
                 continue
 
-            # 将检测到的 label 映射回输入的 text_prompts 索引
             label_id = self._match_label_to_prompt(det_label, cleaned_prompts)
 
             detections.append({
@@ -196,11 +193,7 @@ class GroundingDINOEngine:
 
     @staticmethod
     def _match_label_to_prompt(det_label: str, prompts: list[str]) -> int:
-        """
-        将 Grounding DINO 输出的 label 字符串匹配回输入的 text_prompts 索引。
-
-        优先完全匹配，其次子字符串匹配。
-        """
+        """将 Grounding DINO 输出的 label 匹配回输入的 text_prompts 索引。"""
         det_label_lower = det_label.lower().strip()
         for idx, prompt in enumerate(prompts):
             if det_label_lower == prompt.lower().strip():

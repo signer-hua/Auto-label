@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # ==================== Auto-label 一键安装脚本 ====================
-# 适用于 Linux/macOS
 # 环境要求：Python >= 3.12, CUDA >= 12.6, GPU >= 12GB
 set -e
 
@@ -24,6 +23,12 @@ pip install -e backend/libs/sam3
 
 # 4. 安装前端依赖
 echo "[4/4] 安装前端依赖..."
+# 如果存在本地 npm-cache 则使用
+NPM_CACHE_DIR="$(dirname "$PWD")/.npm-cache"
+if [ -d "$NPM_CACHE_DIR" ]; then
+    echo "  使用本地 npm 缓存: $NPM_CACHE_DIR"
+    npm config set cache "$NPM_CACHE_DIR"
+fi
 cd frontend
 npm install
 cd ..
@@ -31,8 +36,10 @@ cd ..
 echo "=========================================="
 echo "  安装完成！"
 echo ""
-echo "  注意：Grounding DINO 模型权重将在首次启动时"
-echo "  自动从 HuggingFace Hub 下载，无需手动操作。"
+echo "  权重文件应放在: ../weights/ 目录下"
+echo "    - sam3.pt"
+echo "    - dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+echo "    (Grounding DINO 权重首次启动自动下载)"
 echo ""
 echo "  启动命令（4 个终端）："
 echo "  1. redis-server"

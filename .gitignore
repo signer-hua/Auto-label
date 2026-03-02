@@ -22,6 +22,9 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 
+# npm 缓存
+.npm-cache/
+
 # IDE
 .vscode/
 .idea/
@@ -33,11 +36,18 @@ frontend/.vite/
 Thumbs.db
 
 # 模型权重（太大不提交）
+weights/
 *.pth
 *.pt
 *.onnx
 *.bin
 !backend/libs/sam3/sam3/assets/*.gz
 
+# 环境配置（包含本地路径）
+.env
+
 # 日志
 *.log
+
+# HuggingFace 缓存
+.cache/

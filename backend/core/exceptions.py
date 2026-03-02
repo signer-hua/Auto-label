@@ -49,10 +49,6 @@ class GroundingDINODetectionError(Exception):
         super().__init__(f"Grounding DINO detection failed: {detail}")
 
 
-# 兼容别名：避免修改其他引用 YOLODetectionError 的代码
-YOLODetectionError = GroundingDINODetectionError
-
-
 class NoDetectionResultError(Exception):
     """检测/匹配无结果"""
     def __init__(self, mode: str = "", detail: str = ""):

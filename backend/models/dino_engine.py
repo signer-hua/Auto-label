@@ -23,7 +23,7 @@ _DINOV3_LIB = _LIBS_ROOT / "dinov3"
 if str(_DINOV3_LIB) not in sys.path:
     sys.path.insert(0, str(_DINOV3_LIB))
 
-from backend.core.config import DINO_DEVICE, COSINE_SIMILARITY_THRESHOLD, DINO_CLUSTER_NUM
+from backend.core.config import DINO_DEVICE, COSINE_SIMILARITY_THRESHOLD, DINO_CLUSTER_NUM, DINO_WEIGHTS_PATH
 
 import logging
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class DINOEngine:
     def warmup(self) -> None:
         """
         预热模型：加载 DINOv3 ViT-S/16 到 GPU，转为半精度。
-        应在 Celery Worker 启动时调用一次。
+        优先从本地权重文件加载，如不存在则通过 torch.hub 在线下载。
         """
         if self._warmed_up:
             return
@@ -76,7 +76,18 @@ class DINOEngine:
         logger.info("[DINOv3] Warming up model on %s (half precision)...", self.device)
 
         from dinov3.hub.backbones import dinov3_vits16
-        self.model = dinov3_vits16(pretrained=True)
+
+        weights_path = Path(DINO_WEIGHTS_PATH) if DINO_WEIGHTS_PATH else None
+
+        if weights_path and weights_path.exists():
+            logger.info("[DINOv3] Loading weights from local: %s", weights_path)
+            self.model = dinov3_vits16(pretrained=False)
+            state_dict = torch.load(str(weights_path), map_location="cpu", weights_only=True)
+            self.model.load_state_dict(state_dict, strict=False)
+        else:
+            logger.info("[DINOv3] Downloading weights from torch.hub...")
+            self.model = dinov3_vits16(pretrained=True)
+
         self.model = self.model.to(self.device).half().eval()
         self._warmed_up = True
         logger.info("[DINOv3] Model warmed up successfully.")

@@ -55,7 +55,7 @@ class SAMEngine:
     def warmup(self) -> None:
         """
         预热模型：加载 SAM3 到 GPU，转为半精度 (float16)。
-        应在 Celery Worker 启动时调用一次。
+        优先从本地权重文件加载（SAM3_CHECKPOINT），如不存在则自动从 HuggingFace 下载。
         """
         if self._warmed_up:
             return
@@ -66,11 +66,20 @@ class SAMEngine:
         from sam3.model.sam3_image_processor import Sam3Processor
 
         checkpoint = SAM3_CHECKPOINT if SAM3_CHECKPOINT else None
+        # 检查本地权重是否存在
+        load_from_hf = True
+        if checkpoint and Path(checkpoint).exists():
+            logger.info("[SAM3] Loading weights from local: %s", checkpoint)
+            load_from_hf = False
+        else:
+            logger.info("[SAM3] Downloading weights from HuggingFace...")
+            checkpoint = None
+
         self.model = build_sam3_image_model(
             device=self.device,
             eval_mode=True,
             checkpoint_path=checkpoint,
-            load_from_HF=True if checkpoint is None else False,
+            load_from_HF=load_from_hf,
             enable_segmentation=True,
             enable_inst_interactivity=False,
             compile=False,
