@@ -78,11 +78,11 @@ def _release_all_models():
     """统一释放所有模型的 GPU 显存"""
     from backend.models.sam_engine import SAMEngine
     from backend.models.dino_engine import DINOEngine
-    from backend.models.yolo_engine import YOLOWorldEngine
+    from backend.models.grounding_dino_engine import GroundingDINOEngine
 
     SAMEngine.get_instance().release_memory()
     DINOEngine.get_instance().release_memory()
-    YOLOWorldEngine.get_instance().release_memory()
+    GroundingDINOEngine.get_instance().release_memory()
 
 
 def _handle_gpu_oom(r, task_id: str, e: Exception):
@@ -115,13 +115,13 @@ def warmup_models(**kwargs):
 
     from backend.models.sam_engine import SAMEngine
     from backend.models.dino_engine import DINOEngine
-    from backend.models.yolo_engine import YOLOWorldEngine
+    from backend.models.grounding_dino_engine import GroundingDINOEngine
 
     SAMEngine.get_instance().warmup()
     DINOEngine.get_instance().warmup()
-    YOLOWorldEngine.get_instance().warmup()
+    GroundingDINOEngine.get_instance().warmup()
 
-    logger.info("[Worker] All models (SAM3 + DINOv3 + YOLO-World) warmed up. Ready.")
+    logger.info("[Worker] All models (SAM3 + DINOv3 + Grounding DINO) warmed up. Ready.")
 
 
 # PLACEHOLDER: tasks will be added via StrReplace
@@ -265,14 +265,14 @@ def process_text_annotation(
     """
     模式1 文本提示标注异步任务。
 
-    链路：文本 → YOLO-World 检测 bbox → SAM3 精准 Mask → 蓝色透明 PNG
+    链路：文本 → Grounding DINO 检测 bbox → SAM3 精准 Mask → 彩色透明 PNG
     支持多类别颜色区分、暂停/取消/重试。
     """
     from backend.models.sam_engine import SAMEngine
-    from backend.models.yolo_engine import YOLOWorldEngine
+    from backend.models.grounding_dino_engine import GroundingDINOEngine
     from backend.services.mask_utils import mask_to_transparent_png, mask_to_bbox, mask_to_polygon
     from backend.services.storage import get_mask_path, get_mask_url, get_export_path, get_export_url
-    from backend.core.config import YOLOWORLD_SCORE_THR_LOW
+    from backend.core.config import GROUNDING_DINO_SCORE_THR_LOW
 
     r = _get_redis()
     total = len(image_paths)
@@ -284,10 +284,12 @@ def process_text_annotation(
         })
 
         sam = SAMEngine.get_instance()
-        yolo = YOLOWorldEngine.get_instance()
+        gd = GroundingDINOEngine.get_instance()
 
-        # 解析文本提示为类别列表
-        categories = [c.strip() for c in text_prompt.replace('，', ',').split(',') if c.strip()]
+        # 解析文本提示为类别列表（支持中英文逗号、顿号等分隔符）
+        categories = [c.strip() for c in
+                      text_prompt.replace('，', ',').replace('、', ',').replace('；', ',').split(',')
+                      if c.strip()]
         if not categories:
             raise ValueError("Text prompt is empty after parsing")
 
@@ -325,13 +327,13 @@ def process_text_annotation(
                 "width": img_w, "height": img_h,
             })
 
-            # YOLO-World 文本检测
-            detections = yolo.detect(target_image, categories)
+            # Grounding DINO 文本检测
+            detections = gd.detect(target_image, categories)
 
             # 无检测结果时自动降低阈值重试一次
             if len(detections) == 0:
                 logger.info("[Task %s] No detections at default threshold, retrying with low threshold...", task_id)
-                detections = yolo.detect(target_image, categories, score_thr=YOLOWORLD_SCORE_THR_LOW)
+                detections = gd.detect(target_image, categories, score_thr=GROUNDING_DINO_SCORE_THR_LOW)
 
             image_mask_urls = []
             inst_idx = 0

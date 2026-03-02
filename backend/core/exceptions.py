@@ -42,11 +42,15 @@ class EmptyTextPromptError(Exception):
         super().__init__("Text prompt cannot be empty")
 
 
-class YOLODetectionError(Exception):
-    """YOLO-World 推理失败"""
+class GroundingDINODetectionError(Exception):
+    """Grounding DINO 推理失败"""
     def __init__(self, detail: str = ""):
         self.detail = detail
-        super().__init__(f"YOLO-World detection failed: {detail}")
+        super().__init__(f"Grounding DINO detection failed: {detail}")
+
+
+# 兼容别名：避免修改其他引用 YOLODetectionError 的代码
+YOLODetectionError = GroundingDINODetectionError
 
 
 class NoDetectionResultError(Exception):
@@ -115,11 +119,11 @@ def register_exception_handlers(app):
             content={"error": "empty_text_prompt", "detail": str(exc)},
         )
 
-    @app.exception_handler(YOLODetectionError)
-    async def yolo_detection_handler(request: Request, exc: YOLODetectionError):
+    @app.exception_handler(GroundingDINODetectionError)
+    async def grounding_dino_detection_handler(request: Request, exc: GroundingDINODetectionError):
         return JSONResponse(
             status_code=500,
-            content={"error": "yolo_detection_failed", "detail": str(exc)},
+            content={"error": "detection_failed", "detail": str(exc)},
         )
 
     @app.exception_handler(NoDetectionResultError)

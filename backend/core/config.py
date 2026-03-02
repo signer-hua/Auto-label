@@ -43,16 +43,16 @@ SAM3_DEVICE = os.getenv("SAM3_DEVICE", "cuda")
 DINO_MODEL_NAME = os.getenv("DINO_MODEL_NAME", "dinov3_vits16")
 DINO_DEVICE = os.getenv("DINO_DEVICE", "cuda")
 
-# YOLO-World
-YOLOWORLD_CONFIG = os.getenv(
-    "YOLOWORLD_CONFIG",
-    str(LIBS_ROOT / "yolo_world" / "configs" / "pretrain" /
-        "yolo_world_v2_s_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py"),
-)
-YOLOWORLD_WEIGHTS = os.getenv("YOLOWORLD_WEIGHTS", "")  # 需手动下载并指定路径
-YOLOWORLD_DEVICE = os.getenv("YOLOWORLD_DEVICE", "cuda")
-YOLOWORLD_SCORE_THR = float(os.getenv("YOLOWORLD_SCORE_THR", "0.3"))  # 文本检测置信度阈值
-YOLOWORLD_NMS_THR = float(os.getenv("YOLOWORLD_NMS_THR", "0.7"))     # NMS IoU 阈值
+# Grounding DINO（替代原 YOLO-World，使用 transformers 库加载，无 MM 系列依赖）
+GROUNDING_DINO_MODEL_NAME = os.getenv("GROUNDING_DINO_MODEL_NAME", "IDEA-Research/grounding-dino-base")
+GROUNDING_DINO_DEVICE = os.getenv("GROUNDING_DINO_DEVICE", "cuda")
+GROUNDING_DINO_SCORE_THR = float(os.getenv("GROUNDING_DINO_SCORE_THR", "0.3"))
+GROUNDING_DINO_BOX_THR = float(os.getenv("GROUNDING_DINO_BOX_THR", "0.3"))
+GROUNDING_DINO_SCORE_THR_LOW = float(os.getenv("GROUNDING_DINO_SCORE_THR_LOW", "0.2"))
+
+# 兼容性别名：原 YOLO-World 阈值变量名映射到 Grounding DINO，避免修改其他代码逻辑
+YOLOWORLD_SCORE_THR = GROUNDING_DINO_SCORE_THR
+YOLOWORLD_SCORE_THR_LOW = GROUNDING_DINO_SCORE_THR_LOW
 
 # ==================== 标注参数 ====================
 # 余弦相似度阈值（模式2 特征匹配）
@@ -88,8 +88,8 @@ MODE1_CATEGORY_COLORS = [
 # ==================== DINOv3 聚类参数（模式3） ====================
 DINO_CLUSTER_NUM = int(os.getenv("DINO_CLUSTER_NUM", "8"))  # K-Means 聚类数
 
-# ==================== YOLO-World 低阈值（重试用） ====================
-YOLOWORLD_SCORE_THR_LOW = float(os.getenv("YOLOWORLD_SCORE_THR_LOW", "0.2"))
+# ==================== Grounding DINO 低阈值（重试用） ====================
+# 已在 Grounding DINO 配置中定义 GROUNDING_DINO_SCORE_THR_LOW，此处保留兼容别名
 
 # ==================== Redis 任务过期时间 ====================
 REDIS_TASK_EXPIRE = int(os.getenv("REDIS_TASK_EXPIRE", "86400"))  # 默认 24 小时
