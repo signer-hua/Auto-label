@@ -1,9 +1,11 @@
 /**
- * Zustand 全局状态管理
+ * Zustand 全局状态管理（增强版）
  *
- * 管理：三种标注模式（mode1/mode2/mode3）、文本提示、上传图片列表、
- *       框选坐标、task_id、任务状态、进度、Mask URL 映射表、
- *       模式3 实例选择、Mask 透明度、任务控制（暂停/取消）。
+ * v2 增强：
+ *   - 图层隔离修复：bbox/实例与 imageId 强绑定，切图不污染
+ *   - 多实例选择：selectedInstanceIds 替代 selectedInstanceId
+ *   - 多类别管理：categories + activeCategoryId + 类别-参考绑定
+ *   - 模式切换自动清空非当前模式画布元素
  */
 import { create } from 'zustand';
 
@@ -31,6 +33,25 @@ export interface InstanceItem {
   color: number[];
 }
 
+/** 用户定义的类别 */
+export interface CategoryItem {
+  id: string;
+  name: string;
+  color: string;
+}
+
+/** 模式2 类别-框选绑定 */
+export interface Mode2CategoryRef {
+  categoryId: string;
+  bboxes: BBox[];
+}
+
+/** 模式3 类别-实例绑定 */
+export interface Mode3CategoryRef {
+  categoryId: string;
+  instanceIds: number[];
+}
+
 /** 工具类型 */
 export type ToolType = 'select' | 'pan' | 'zoom';
 
@@ -41,6 +62,13 @@ export type AnnotationMode = 'mode1' | 'mode2' | 'mode3';
 export type TaskStatus =
   | 'idle' | 'pending' | 'processing' | 'success' | 'failed'
   | 'paused' | 'canceled' | 'instance_ready';
+
+/** 多类别颜色预设 */
+const CATEGORY_COLORS = [
+  '#FF5050', '#50C850', '#5078FF', '#FFC800',
+  '#C850FF', '#00DCB4', '#FF7800', '#B4B400',
+  '#6496FF', '#FF6464',
+];
 
 /** 全局状态 */
 interface AppState {
@@ -56,6 +84,7 @@ interface AppState {
   // ===== 交互工具 =====
   activeTool: ToolType;
   bbox: BBox | null;
+  bboxImageId: string | null;  // bbox 绑定的图片 ID（图层隔离）
   isDrawing: boolean;
 
   // ===== 异步任务 =====
@@ -69,12 +98,19 @@ interface AppState {
   // ===== Mask 结果 =====
   maskUrls: Record<string, string[]>;
   exportUrl: string | null;
-  maskOpacity: number;  // Mask 透明度 0~1
+  maskOpacity: number;
 
-  // ===== 模式3 实例选择 =====
+  // ===== 模式3 实例选择（多选） =====
   discoveryTaskId: string | null;
   instanceMasks: InstanceItem[];
-  selectedInstanceId: number | null;
+  instanceMasksImageId: string | null;  // 实例绑定的图片 ID（图层隔离）
+  selectedInstanceIds: number[];  // 多选（替代原 selectedInstanceId）
+
+  // ===== 多类别管理 =====
+  categories: CategoryItem[];
+  activeCategoryId: string | null;
+  mode2CategoryRefs: Mode2CategoryRef[];  // 模式2 类别-框选绑定
+  mode3CategoryRefs: Mode3CategoryRef[];  // 模式3 类别-实例绑定
 
   // ===== 画布状态 =====
   stageScale: number;
@@ -91,6 +127,7 @@ interface AppState {
   setViewingImage: (id: string | null) => void;
   setActiveTool: (tool: ToolType) => void;
   setBBox: (bbox: BBox | null) => void;
+  setBBoxImageId: (id: string | null) => void;
   setIsDrawing: (drawing: boolean) => void;
   setTask: (taskId: string, status: TaskStatus) => void;
   updateTaskProgress: (progress: number, total: number, message: string) => void;
@@ -100,14 +137,24 @@ interface AppState {
   setExportUrl: (url: string | null) => void;
   setMaskOpacity: (opacity: number) => void;
   setDiscoveryTaskId: (id: string | null) => void;
-  setInstanceMasks: (instances: InstanceItem[]) => void;
-  setSelectedInstanceId: (id: number | null) => void;
+  setInstanceMasks: (instances: InstanceItem[], imageId?: string) => void;
+  toggleInstanceId: (id: number) => void;
+  setSelectedInstanceIds: (ids: number[]) => void;
   setStageScale: (scale: number) => void;
   setStagePosition: (pos: { x: number; y: number }) => void;
   resetTask: () => void;
+  // 多类别
+  addCategory: (name: string) => void;
+  removeCategory: (id: string) => void;
+  setActiveCategoryId: (id: string | null) => void;
+  clearCategories: () => void;
+  confirmMode2Bbox: () => void;  // 将当前 bbox 添加到 activeCategoryId
+  setMode3CategoryInstances: (categoryId: string, instanceIds: number[]) => void;
 }
 
-export const useAppStore = create<AppState>((set) => ({
+let _nextCategoryId = 1;
+
+export const useAppStore = create<AppState>((set, get) => ({
   // 初始状态
   currentMode: 'mode1',
   textPrompt: '',
@@ -116,6 +163,7 @@ export const useAppStore = create<AppState>((set) => ({
   viewingImageId: null,
   activeTool: 'select',
   bbox: null,
+  bboxImageId: null,
   isDrawing: false,
   taskId: null,
   taskStatus: 'idle',
@@ -128,13 +176,27 @@ export const useAppStore = create<AppState>((set) => ({
   maskOpacity: 0.7,
   discoveryTaskId: null,
   instanceMasks: [],
-  selectedInstanceId: null,
+  instanceMasksImageId: null,
+  selectedInstanceIds: [],
+  categories: [],
+  activeCategoryId: null,
+  mode2CategoryRefs: [],
+  mode3CategoryRefs: [],
   stageScale: 1,
   stagePosition: { x: 0, y: 0 },
 
-  // Actions
+  // ========== Actions ==========
+
   setCurrentMode: (mode) =>
-    set({ currentMode: mode, bbox: null, instanceMasks: [], selectedInstanceId: null }),
+    set({
+      currentMode: mode,
+      bbox: null,
+      bboxImageId: null,
+      instanceMasks: [],
+      instanceMasksImageId: null,
+      selectedInstanceIds: [],
+      isDrawing: false,
+    }),
 
   setTextPrompt: (text) =>
     set({ textPrompt: text }),
@@ -154,11 +216,20 @@ export const useAppStore = create<AppState>((set) => ({
       const updates: Partial<AppState> = { images };
       if (s.selectedImageId === id) updates.selectedImageId = images[0]?.id || null;
       if (s.viewingImageId === id) updates.viewingImageId = null;
+      if (s.bboxImageId === id) {
+        updates.bbox = null;
+        updates.bboxImageId = null;
+      }
+      if (s.instanceMasksImageId === id) {
+        updates.instanceMasks = [];
+        updates.instanceMasksImageId = null;
+        updates.selectedInstanceIds = [];
+      }
       return updates;
     }),
 
   selectImage: (id) =>
-    set({ selectedImageId: id, bbox: null }),
+    set({ selectedImageId: id }),
 
   setViewingImage: (id) =>
     set({ viewingImageId: id }),
@@ -166,8 +237,14 @@ export const useAppStore = create<AppState>((set) => ({
   setActiveTool: (tool) =>
     set({ activeTool: tool }),
 
-  setBBox: (bbox) =>
-    set({ bbox }),
+  setBBox: (bbox) => {
+    const state = get();
+    const displayId = state.viewingImageId || state.selectedImageId;
+    set({ bbox, bboxImageId: displayId });
+  },
+
+  setBBoxImageId: (id) =>
+    set({ bboxImageId: id }),
 
   setIsDrawing: (drawing) =>
     set({ isDrawing: drawing }),
@@ -196,11 +273,26 @@ export const useAppStore = create<AppState>((set) => ({
   setDiscoveryTaskId: (id) =>
     set({ discoveryTaskId: id }),
 
-  setInstanceMasks: (instances) =>
-    set({ instanceMasks: instances }),
+  setInstanceMasks: (instances, imageId) => {
+    const state = get();
+    const imgId = imageId || state.viewingImageId || state.selectedImageId;
+    set({
+      instanceMasks: instances,
+      instanceMasksImageId: imgId,
+      selectedInstanceIds: [],
+    });
+  },
 
-  setSelectedInstanceId: (id) =>
-    set({ selectedInstanceId: id }),
+  toggleInstanceId: (id) =>
+    set((s) => {
+      const ids = s.selectedInstanceIds.includes(id)
+        ? s.selectedInstanceIds.filter((i) => i !== id)
+        : [...s.selectedInstanceIds, id];
+      return { selectedInstanceIds: ids };
+    }),
+
+  setSelectedInstanceIds: (ids) =>
+    set({ selectedInstanceIds: ids }),
 
   setStageScale: (scale) =>
     set({ stageScale: scale }),
@@ -220,6 +312,78 @@ export const useAppStore = create<AppState>((set) => ({
       exportUrl: null,
       discoveryTaskId: null,
       instanceMasks: [],
-      selectedInstanceId: null,
+      instanceMasksImageId: null,
+      selectedInstanceIds: [],
+      bbox: null,
+      bboxImageId: null,
+    }),
+
+  // ===== 多类别管理 =====
+  addCategory: (name) =>
+    set((s) => {
+      const id = `cat_${_nextCategoryId++}`;
+      const colorIdx = s.categories.length % CATEGORY_COLORS.length;
+      const newCat: CategoryItem = { id, name, color: CATEGORY_COLORS[colorIdx] };
+      return {
+        categories: [...s.categories, newCat],
+        activeCategoryId: s.activeCategoryId || id,
+      };
+    }),
+
+  removeCategory: (id) =>
+    set((s) => {
+      const categories = s.categories.filter((c) => c.id !== id);
+      const activeCategoryId = s.activeCategoryId === id
+        ? (categories[0]?.id || null)
+        : s.activeCategoryId;
+      return {
+        categories,
+        activeCategoryId,
+        mode2CategoryRefs: s.mode2CategoryRefs.filter((r) => r.categoryId !== id),
+        mode3CategoryRefs: s.mode3CategoryRefs.filter((r) => r.categoryId !== id),
+      };
+    }),
+
+  setActiveCategoryId: (id) =>
+    set({ activeCategoryId: id }),
+
+  clearCategories: () =>
+    set({
+      categories: [],
+      activeCategoryId: null,
+      mode2CategoryRefs: [],
+      mode3CategoryRefs: [],
+    }),
+
+  confirmMode2Bbox: () =>
+    set((s) => {
+      if (!s.bbox || !s.activeCategoryId) return {};
+      const existing = s.mode2CategoryRefs.find((r) => r.categoryId === s.activeCategoryId);
+      const bboxCopy: BBox = { ...s.bbox };
+      let refs: Mode2CategoryRef[];
+      if (existing) {
+        refs = s.mode2CategoryRefs.map((r) =>
+          r.categoryId === s.activeCategoryId
+            ? { ...r, bboxes: [...r.bboxes, bboxCopy] }
+            : r
+        );
+      } else {
+        refs = [...s.mode2CategoryRefs, { categoryId: s.activeCategoryId!, bboxes: [bboxCopy] }];
+      }
+      return { mode2CategoryRefs: refs, bbox: null };
+    }),
+
+  setMode3CategoryInstances: (categoryId, instanceIds) =>
+    set((s) => {
+      const existing = s.mode3CategoryRefs.find((r) => r.categoryId === categoryId);
+      let refs: Mode3CategoryRef[];
+      if (existing) {
+        refs = s.mode3CategoryRefs.map((r) =>
+          r.categoryId === categoryId ? { ...r, instanceIds } : r
+        );
+      } else {
+        refs = [...s.mode3CategoryRefs, { categoryId, instanceIds }];
+      }
+      return { mode3CategoryRefs: refs };
     }),
 }));

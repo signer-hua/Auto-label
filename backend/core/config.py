@@ -51,7 +51,14 @@ DINO_WEIGHTS_PATH = os.getenv("DINO_WEIGHTS_PATH", str(WEIGHTS_DIR / "dinov3_vit
 
 # Grounding DINO（使用 transformers 库加载，无 MM 系列依赖）
 # 可以是 HuggingFace Hub 模型名称，也可以是本地目录路径
-GROUNDING_DINO_MODEL_NAME = os.getenv("GROUNDING_DINO_MODEL_NAME", "IDEA-Research/grounding-dino-base")
+GROUNDING_DINO_MODEL_NAME = os.getenv(
+    "GROUNDING_DINO_MODEL_NAME",
+    # 优先使用本地目录（手动下载后放到 weights/grounding-dino-base/），
+    # 如果本地目录不存在则回退到 HuggingFace Hub 在线加载
+    str(WEIGHTS_DIR / "grounding-dino-base")
+    if (WEIGHTS_DIR / "grounding-dino-base" / "config.json").exists()
+    else "IDEA-Research/grounding-dino-base"
+)
 GROUNDING_DINO_DEVICE = os.getenv("GROUNDING_DINO_DEVICE", "cuda")
 GROUNDING_DINO_SCORE_THR = float(os.getenv("GROUNDING_DINO_SCORE_THR", "0.3"))
 GROUNDING_DINO_BOX_THR = float(os.getenv("GROUNDING_DINO_BOX_THR", "0.3"))
@@ -90,6 +97,44 @@ MODE1_CATEGORY_COLORS = [
 
 # ==================== DINOv3 聚类参数（模式3） ====================
 DINO_CLUSTER_NUM = int(os.getenv("DINO_CLUSTER_NUM", "8"))  # K-Means 聚类数
+
+# ==================== DINOv3 算法优化参数 ====================
+DINO_MULTI_SCALES = [0.8, 1.0, 1.2]  # 多尺度特征提取（不同视野范围）
+DINO_ELBOW_MAX_K = int(os.getenv("DINO_ELBOW_MAX_K", "10"))
+DINO_MIN_CLUSTER_RATIO = float(os.getenv("DINO_MIN_CLUSTER_RATIO", "0.01"))
+DINO_BG_PAD_RATIO = float(os.getenv("DINO_BG_PAD_RATIO", "0.15"))
+
+# 动态余弦相似度阈值（按目标面积比自适应调整）
+COSINE_SIM_LARGE_THRESH = float(os.getenv("COSINE_SIM_LARGE_THRESH", "0.72"))
+COSINE_SIM_SMALL_THRESH = float(os.getenv("COSINE_SIM_SMALL_THRESH", "0.65"))
+COSINE_SIM_AREA_CUTOFF = float(os.getenv("COSINE_SIM_AREA_CUTOFF", "0.05"))
+
+# 框选质量校验（模式2）
+BBOX_MIN_AREA = int(os.getenv("BBOX_MIN_AREA", "100"))
+BBOX_MAX_RATIO = float(os.getenv("BBOX_MAX_RATIO", "0.9"))
+
+# ==================== SAM3 优化参数 ====================
+SAM3_MULTIMASK_UNION = os.getenv("SAM3_MULTIMASK_UNION", "true").lower() == "true"
+SAM3_SCORE_THRESHOLD = float(os.getenv("SAM3_SCORE_THRESHOLD", "0.6"))
+SAM3_MORPH_KERNEL = int(os.getenv("SAM3_MORPH_KERNEL", "5"))
+
+# ==================== 图像预处理参数 ====================
+PREPROCESS_CLAHE = os.getenv("PREPROCESS_CLAHE", "true").lower() == "true"
+PREPROCESS_DENOISE = os.getenv("PREPROCESS_DENOISE", "true").lower() == "true"
+PREPROCESS_CLAHE_CLIP = float(os.getenv("PREPROCESS_CLAHE_CLIP", "2.0"))
+PREPROCESS_CLAHE_GRID = int(os.getenv("PREPROCESS_CLAHE_GRID", "8"))
+
+# ==================== 模式2/3 多类别颜色调色板 ====================
+MULTI_CATEGORY_COLORS = [
+    (255, 80, 80),    # 红色
+    (80, 200, 80),    # 绿色
+    (80, 120, 255),   # 蓝色
+    (255, 200, 0),    # 黄色
+    (200, 80, 255),   # 紫色
+    (0, 220, 180),    # 青色
+    (255, 120, 0),    # 橙色
+    (180, 180, 0),    # 橄榄
+]
 
 # ==================== Redis 任务过期时间 ====================
 REDIS_TASK_EXPIRE = int(os.getenv("REDIS_TASK_EXPIRE", "86400"))  # 默认 24 小时

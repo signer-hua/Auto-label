@@ -38,7 +38,7 @@ const RightPanel: React.FC = () => {
     maskUrls, exportUrl,
     selectImage, setViewingImage, removeImage, addImages,
     updateTaskProgress, setTaskStatus, setMaskUrls, setExportUrl,
-    setErrorType, setInstanceMasks, setTask,
+    setErrorType, setInstanceMasks, setTask, selectedImageId: refImageId,
   } = useAppStore();
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -97,10 +97,9 @@ const RightPanel: React.FC = () => {
           message.info('任务已取消');
           if (pollRef.current) clearInterval(pollRef.current);
         } else if (res.status === 'instance_ready') {
-          // 模式3 阶段1 完成：实例就绪
           setTaskStatus('instance_ready', res.message);
           if (res.instance_masks) {
-            setInstanceMasks(res.instance_masks);
+            setInstanceMasks(res.instance_masks, refImageId || undefined);
           }
           message.success('实例生成完成，请选择目标实例');
           if (pollRef.current) clearInterval(pollRef.current);

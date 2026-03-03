@@ -1,11 +1,11 @@
 """
-SAM3 单例引擎
-负责：基于 bbox 驱动的 Mask 生成，支持半精度 (float16) 推理。
-采用单例模式，Celery Worker 启动时预热加载到 GPU。
+SAM3 单例引擎（增强版）
+负责：基于 bbox 驱动的 Mask 生成，采用 float32 + autocast 自动混合精度推理。
 
-核心方法：
-    - warmup(): Worker 启动时调用，加载模型到 GPU 并转为半精度
-    - generate_mask(image, bbox): 输入图像 + bbox，输出布尔 Mask
+v2 增强：
+    - 多 Mask 并集融合（multimask → union）提升召回率
+    - 形态学后处理（闭运算填充空洞 + 高斯平滑边缘）
+    - 降低分数阈值适配小目标
 """
 import sys
 import gc
@@ -15,13 +15,15 @@ from pathlib import Path
 from typing import Optional
 from PIL import Image
 
-# 将内置 sam3 库加入 Python 路径
 _LIBS_ROOT = Path(__file__).parent.parent / "libs"
 _SAM3_LIB = _LIBS_ROOT / "sam3"
 if str(_SAM3_LIB) not in sys.path:
     sys.path.insert(0, str(_SAM3_LIB))
 
-from backend.core.config import SAM3_CHECKPOINT, SAM3_DEVICE
+from backend.core.config import (
+    SAM3_CHECKPOINT, SAM3_DEVICE,
+    SAM3_MULTIMASK_UNION, SAM3_SCORE_THRESHOLD, SAM3_MORPH_KERNEL,
+)
 
 import logging
 logger = logging.getLogger(__name__)
@@ -29,12 +31,12 @@ logger = logging.getLogger(__name__)
 
 class SAMEngine:
     """
-    SAM3 单例引擎。
+    SAM3 单例引擎（增强版）。
 
-    使用方式：
-        engine = SAMEngine.get_instance()
-        engine.warmup()  # Worker 启动时调用一次
-        mask = engine.generate_mask(image, [x1, y1, x2, y2])
+    增强特性：
+        - 多 Mask 并集融合：取多个高分 Mask 的并集，提升目标完整性
+        - 形态学后处理：闭运算填充空洞 + 高斯模糊平滑边缘
+        - 降低分数阈值：score_threshold=0.6 提升小目标召回率
     """
 
     _instance: Optional["SAMEngine"] = None
@@ -47,26 +49,20 @@ class SAMEngine:
 
     @classmethod
     def get_instance(cls) -> "SAMEngine":
-        """获取全局单例"""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
     def warmup(self) -> None:
-        """
-        预热模型：加载 SAM3 到 GPU，转为半精度 (float16)。
-        优先从本地权重文件加载（SAM3_CHECKPOINT），如不存在则自动从 HuggingFace 下载。
-        """
         if self._warmed_up:
             return
 
-        logger.info("[SAM3] Warming up model on %s (half precision)...", self.device)
+        logger.info("[SAM3] Warming up model on %s (float32 + autocast)...", self.device)
 
         from sam3.model_builder import build_sam3_image_model
         from sam3.model.sam3_image_processor import Sam3Processor
 
         checkpoint = SAM3_CHECKPOINT if SAM3_CHECKPOINT else None
-        # 检查本地权重是否存在
         load_from_hf = True
         if checkpoint and Path(checkpoint).exists():
             logger.info("[SAM3] Loading weights from local: %s", checkpoint)
@@ -84,24 +80,56 @@ class SAMEngine:
             enable_inst_interactivity=False,
             compile=False,
         )
-        # 转为半精度以节省显存
-        self.model = self.model.half()
         self.processor = Sam3Processor(self.model)
         self._warmed_up = True
         logger.info("[SAM3] Model warmed up successfully.")
+
+    @staticmethod
+    def _morphological_postprocess(mask: np.ndarray) -> np.ndarray:
+        """
+        形态学后处理：闭运算填充空洞 + 高斯模糊平滑边缘。
+
+        Args:
+            mask: 布尔 numpy 数组 [H, W]
+
+        Returns:
+            processed_mask: 优化后的布尔 Mask
+        """
+        import cv2
+
+        kernel_size = SAM3_MORPH_KERNEL
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+        )
+
+        mask_uint8 = mask.astype(np.uint8) * 255
+        closed = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel, iterations=2)
+        blurred = cv2.GaussianBlur(closed, (kernel_size, kernel_size), 0)
+        result = (blurred > 127).astype(bool)
+
+        return result
 
     @torch.no_grad()
     def generate_mask(
         self,
         image: Image.Image,
         bbox: list[float],
+        use_multimask_union: bool | None = None,
+        use_morph: bool = True,
     ) -> np.ndarray:
         """
-        基于边界框生成实例 Mask。
+        基于边界框生成实例 Mask（增强版）。
+
+        增强策略：
+        1. 获取多个候选 Mask
+        2. 对高分 Mask 取并集融合（提升完整性）
+        3. 形态学后处理（填充空洞 + 平滑边缘）
 
         Args:
             image: PIL Image (RGB)
             bbox: [x1, y1, x2, y2] 像素坐标
+            use_multimask_union: 是否启用多 Mask 并集（None 则使用配置）
+            use_morph: 是否启用形态学后处理
 
         Returns:
             mask: 布尔 numpy 数组，shape [H, W]
@@ -109,37 +137,80 @@ class SAMEngine:
         if not self._warmed_up:
             self.warmup()
 
+        if use_multimask_union is None:
+            use_multimask_union = SAM3_MULTIMASK_UNION
+
         x1, y1, x2, y2 = bbox
         img_w, img_h = image.size
 
-        # 设置图像（编码）
-        state = self.processor.set_image(image)
-
-        # 转换为 SAM3 归一化格式 [cx, cy, w, h]
         cx = (x1 + x2) / 2.0 / img_w
         cy = (y1 + y2) / 2.0 / img_h
         w = (x2 - x1) / img_w
         h = (y2 - y1) / img_h
 
-        output = self.processor.add_geometric_prompt(
-            box=[cx, cy, w, h],
-            label=True,
-            state=state,
-        )
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            state = self.processor.set_image(image)
+            output = self.processor.add_geometric_prompt(
+                box=[cx, cy, w, h],
+                label=True,
+                state=state,
+            )
 
-        if output and "masks" in output and len(output["masks"]) > 0:
-            scores = output["scores"]
-            best_idx = scores.argmax().item() if hasattr(scores, 'argmax') else 0
-            mask = output["masks"][best_idx]
-            if isinstance(mask, torch.Tensor):
-                mask = mask.cpu().numpy()
-            return mask.astype(bool)
+        if not output or "masks" not in output or len(output["masks"]) == 0:
+            return np.zeros((img_h, img_w), dtype=bool)
 
-        # fallback: 返回空 Mask
-        return np.zeros((img_h, img_w), dtype=bool)
+        masks = output["masks"]
+        scores = output["scores"]
+
+        if hasattr(scores, 'cpu'):
+            scores_np = scores.cpu().numpy().flatten()
+        elif isinstance(scores, (list, tuple)):
+            scores_np = np.array(scores).flatten()
+        else:
+            scores_np = np.array([scores]).flatten()
+
+        def _to_2d_bool(m):
+            if isinstance(m, torch.Tensor):
+                m = m.cpu().numpy()
+            while m.ndim > 2:
+                m = m[0]
+            return m.astype(bool)
+
+        if use_multimask_union and len(masks) > 1:
+            valid_indices = np.where(scores_np >= SAM3_SCORE_THRESHOLD)[0]
+
+            if len(valid_indices) == 0:
+                best_idx = scores_np.argmax()
+                final_mask = _to_2d_bool(masks[best_idx])
+            elif len(valid_indices) == 1:
+                final_mask = _to_2d_bool(masks[valid_indices[0]])
+            else:
+                union_mask = np.zeros((img_h, img_w), dtype=bool)
+                for idx in valid_indices:
+                    m = _to_2d_bool(masks[idx])
+                    if m.shape != (img_h, img_w):
+                        import cv2
+                        m = cv2.resize(m.astype(np.uint8), (img_w, img_h),
+                                       interpolation=cv2.INTER_NEAREST).astype(bool)
+                    union_mask = union_mask | m
+                final_mask = union_mask
+        else:
+            best_idx = scores_np.argmax()
+            final_mask = _to_2d_bool(masks[best_idx])
+
+        if final_mask.shape != (img_h, img_w):
+            import cv2
+            final_mask = cv2.resize(
+                final_mask.astype(np.uint8), (img_w, img_h),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+
+        if use_morph and final_mask.sum() > 50:
+            final_mask = self._morphological_postprocess(final_mask)
+
+        return final_mask
 
     def release_memory(self) -> None:
-        """释放 GPU 显存（批量任务完成后调用）"""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()

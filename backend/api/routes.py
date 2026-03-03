@@ -53,12 +53,19 @@ class Mode1Request(BaseModel):
     image_paths: list[str] = Field(..., description="待标注图像路径列表")
 
 
+class CategoryBboxRef(BaseModel):
+    """多类别框选参考"""
+    name: str = Field(..., description="类别名称")
+    bboxes: list[list[float]] = Field(..., description="框选坐标列表 [[x1,y1,x2,y2], ...]")
+
+
 class Mode2Request(BaseModel):
-    """模式2 标注请求"""
+    """模式2 标注请求（支持多类别）"""
     ref_image_id: str = Field(..., description="首图（参考图）ID")
     ref_image_path: str = Field(..., description="首图本地路径")
-    bbox: list[float] = Field(..., description="框选坐标 [x1, y1, x2, y2]")
+    bbox: list[float] = Field(default=[], description="单类别框选坐标 [x1,y1,x2,y2]（向后兼容）")
     target_images: list[dict] = Field(..., description="待标注图像列表 [{id, path}]")
+    categories: list[CategoryBboxRef] | None = Field(None, description="多类别参考（可选，覆盖 bbox）")
 
 
 class Mode3DiscoveryRequest(BaseModel):
@@ -67,13 +74,20 @@ class Mode3DiscoveryRequest(BaseModel):
     ref_image_path: str = Field(..., description="参考图本地路径")
 
 
+class CategoryInstanceRef(BaseModel):
+    """多类别实例参考"""
+    name: str = Field(..., description="类别名称")
+    instance_ids: list[int] = Field(..., description="选中的实例 ID 列表")
+
+
 class Mode3SelectRequest(BaseModel):
-    """模式3 阶段2：选中实例跨图标注请求"""
+    """模式3 阶段2：选中实例跨图标注请求（支持多类别 + 多实例）"""
     discovery_task_id: str = Field(..., description="阶段1 的 task_id")
     ref_image_id: str = Field(..., description="参考图 ID")
     ref_image_path: str = Field(..., description="参考图本地路径")
-    selected_instance_id: int = Field(..., description="用户选中的实例 ID")
+    selected_instance_id: int = Field(default=0, description="单实例 ID（向后兼容）")
     target_images: list[dict] = Field(..., description="待标注图像列表 [{id, path}]")
+    categories: list[CategoryInstanceRef] | None = Field(None, description="多类别参考（可选，覆盖 selected_instance_id）")
 
 
 class TaskStatusResponse(BaseModel):
@@ -191,13 +205,19 @@ async def annotate_mode2(req: Mode2Request):
     target_paths = [img["path"] for img in req.target_images]
     target_ids = [img["id"] for img in req.target_images]
 
+    cats_json = None
+    if req.categories:
+        cats_json = [{"name": c.name, "bboxes": c.bboxes} for c in req.categories]
+
     from backend.worker import process_batch_annotation
     process_batch_annotation.delay(
         ref_image_path=req.ref_image_path, bbox=req.bbox,
         target_image_paths=target_paths, target_image_ids=target_ids,
-        task_id=task_id,
+        task_id=task_id, categories=cats_json,
     )
-    logger.info("Mode2 task: %s (ref=%s, targets=%d)", task_id, req.ref_image_id, len(req.target_images))
+    logger.info("Mode2 task: %s (ref=%s, targets=%d, categories=%d)",
+                task_id, req.ref_image_id, len(req.target_images),
+                len(req.categories) if req.categories else 1)
     return {"task_id": task_id, "status": "pending", "mode": "mode2"}
 
 
@@ -247,6 +267,10 @@ async def annotate_mode3_select(req: Mode3SelectRequest):
     target_paths = [img["path"] for img in req.target_images]
     target_ids = [img["id"] for img in req.target_images]
 
+    cats_json = None
+    if req.categories:
+        cats_json = [{"name": c.name, "instance_ids": c.instance_ids} for c in req.categories]
+
     from backend.worker import process_instance_annotation
     process_instance_annotation.delay(
         ref_image_path=req.ref_image_path,
@@ -255,9 +279,11 @@ async def annotate_mode3_select(req: Mode3SelectRequest):
         target_image_paths=target_paths,
         target_image_ids=target_ids,
         task_id=task_id,
+        categories=cats_json,
     )
-    logger.info("Mode3 select task: %s (instance=%d, targets=%d)",
-                task_id, req.selected_instance_id, len(req.target_images))
+    logger.info("Mode3 select task: %s (instance=%d, targets=%d, categories=%d)",
+                task_id, req.selected_instance_id, len(req.target_images),
+                len(req.categories) if req.categories else 1)
     return {"task_id": task_id, "status": "pending", "mode": "mode3"}
 
 

@@ -1,12 +1,15 @@
 """
-DINOv3 单例引擎
+DINOv3 单例引擎（增强版）
 负责：Mask 区域特征提取、全图 patch 特征匹配（余弦相似度）。
 采用单例模式，Celery Worker 启动时预热加载到 GPU (float16)。
 
-核心方法：
-    - warmup(): Worker 启动时调用，加载模型到 GPU 并转为半精度
-    - extract_mask_feature(image, mask): 提取 Mask 区域的平均特征向量
-    - match_in_image(image, template_feature, threshold): 在目标图中匹配模板特征
+v2 增强：
+    - 多尺度特征融合（0.8x/1.0x/1.2x）
+    - 背景抑制（裁剪目标区域 + padding）
+    - 通道方差注意力加权
+    - 肘部法则自动选择最优聚类数
+    - 多实例特征融合（模式3 多选）
+    - 动态余弦相似度阈值
 """
 import sys
 import gc
@@ -17,13 +20,17 @@ from typing import Optional
 from PIL import Image
 from torchvision import transforms
 
-# 将内置 dinov3 库加入 Python 路径
 _LIBS_ROOT = Path(__file__).parent.parent / "libs"
 _DINOV3_LIB = _LIBS_ROOT / "dinov3"
 if str(_DINOV3_LIB) not in sys.path:
     sys.path.insert(0, str(_DINOV3_LIB))
 
-from backend.core.config import DINO_DEVICE, COSINE_SIMILARITY_THRESHOLD, DINO_CLUSTER_NUM, DINO_WEIGHTS_PATH
+from backend.core.config import (
+    DINO_DEVICE, COSINE_SIMILARITY_THRESHOLD, DINO_CLUSTER_NUM,
+    DINO_WEIGHTS_PATH, DINO_MULTI_SCALES, DINO_ELBOW_MAX_K,
+    DINO_MIN_CLUSTER_RATIO, DINO_BG_PAD_RATIO,
+    COSINE_SIM_LARGE_THRESH, COSINE_SIM_SMALL_THRESH, COSINE_SIM_AREA_CUTOFF,
+)
 
 import logging
 logger = logging.getLogger(__name__)
@@ -31,28 +38,29 @@ logger = logging.getLogger(__name__)
 
 class DINOEngine:
     """
-    DINOv3 ViT-S/16 单例引擎。
+    DINOv3 ViT-S/16 单例引擎（增强版）。
 
-    使用方式：
-        engine = DINOEngine.get_instance()
-        engine.warmup()
-        feature = engine.extract_mask_feature(image, mask)
-        matches = engine.match_in_image(target_image, feature, threshold=0.75)
+    增强特性：
+        - 多尺度特征融合提升鲁棒性
+        - 背景抑制减少噪声干扰
+        - 通道方差注意力强化核心特征
+        - 肘部法则自适应聚类数
+        - 动态余弦相似度阈值
     """
 
     _instance: Optional["DINOEngine"] = None
+    BASE_SIZE = 518
 
     def __init__(self):
         self.model = None
         self.device = DINO_DEVICE
-        self.embed_dim = 384       # ViT-S/16 特征维度
+        self.embed_dim = 384
         self.patch_size = 16
         self._warmed_up = False
 
-        # 标准 ImageNet 预处理
         self.transform = transforms.Compose([
-            transforms.Resize(518, interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.CenterCrop(518),
+            transforms.Resize(self.BASE_SIZE, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(self.BASE_SIZE),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225]),
@@ -60,16 +68,11 @@ class DINOEngine:
 
     @classmethod
     def get_instance(cls) -> "DINOEngine":
-        """获取全局单例"""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
     def warmup(self) -> None:
-        """
-        预热模型：加载 DINOv3 ViT-S/16 到 GPU，转为半精度。
-        优先从本地权重文件加载，如不存在则通过 torch.hub 在线下载。
-        """
         if self._warmed_up:
             return
 
@@ -93,22 +96,117 @@ class DINOEngine:
         logger.info("[DINOv3] Model warmed up successfully.")
 
     def _preprocess(self, image: Image.Image) -> torch.Tensor:
-        """图像预处理，返回 [1, 3, 518, 518] 半精度 Tensor"""
         tensor = self.transform(image).unsqueeze(0).to(self.device).half()
         return tensor
+
+    def _build_transform_at_scale(self, target_size: int) -> transforms.Compose:
+        """为指定输入尺寸构建预处理 pipeline"""
+        return transforms.Compose([
+            transforms.Resize(target_size, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(target_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+
+    def _preprocess_at_scale(self, image: Image.Image, scale: float) -> torch.Tensor:
+        """按指定缩放比例预处理图像"""
+        target_size = int(self.BASE_SIZE * scale)
+        target_size = max(target_size, self.patch_size * 4)
+        t = self._build_transform_at_scale(target_size)
+        return t(image).unsqueeze(0).to(self.device).half()
+
+    @torch.no_grad()
+    def _channel_attention(self, feat_map: torch.Tensor) -> torch.Tensor:
+        """
+        通道方差注意力加权。
+        方差大的通道包含更多判别性信息，给予更高权重。
+
+        Args:
+            feat_map: [1, C, H, W]
+        Returns:
+            加权后的 feat_map: [1, C, H, W]
+        """
+        channel_var = feat_map.squeeze(0).var(dim=(1, 2))  # [C]
+        weights = torch.softmax(channel_var, dim=0)  # [C]
+        weights = weights.unsqueeze(0).unsqueeze(2).unsqueeze(3)  # [1, C, 1, 1]
+        return feat_map * weights
+
+    @torch.no_grad()
+    def _extract_features_single(self, image: Image.Image) -> tuple[torch.Tensor, int, int]:
+        """单尺度特征提取，返回 [1, C, h, w] 和 patch 网格尺寸"""
+        tensor = self._preprocess(image)
+        outputs = self.model.get_intermediate_layers(
+            tensor, n=1, reshape=True, return_class_token=False, norm=True
+        )
+        feat_map = outputs[0]
+        _, c, h, w = feat_map.shape
+        return feat_map, h, w
+
+    @torch.no_grad()
+    def _extract_features_multiscale(
+        self,
+        image: Image.Image,
+    ) -> tuple[torch.Tensor, int, int]:
+        """
+        多尺度特征融合：在 0.8x/1.0x/1.2x 三个尺度提取特征后
+        插值到基准尺度大小并加权平均，提升特征鲁棒性。
+
+        Returns:
+            fused_feat_map: [1, C, h_base, w_base]
+            h_base, w_base: 基准尺度 patch 网格大小
+        """
+        feat_maps = []
+        base_h, base_w = None, None
+
+        for scale in DINO_MULTI_SCALES:
+            tensor = self._preprocess_at_scale(image, scale)
+            outputs = self.model.get_intermediate_layers(
+                tensor, n=1, reshape=True, return_class_token=False, norm=True
+            )
+            fm = outputs[0]  # [1, C, h, w]
+
+            if scale == 1.0:
+                base_h, base_w = fm.shape[2], fm.shape[3]
+
+            feat_maps.append(fm)
+
+        if base_h is None:
+            base_h, base_w = feat_maps[0].shape[2], feat_maps[0].shape[3]
+
+        aligned = []
+        for fm in feat_maps:
+            if fm.shape[2] != base_h or fm.shape[3] != base_w:
+                fm = torch.nn.functional.interpolate(
+                    fm, size=(base_h, base_w), mode='bilinear', align_corners=False
+                )
+            aligned.append(fm)
+
+        fused = torch.stack(aligned, dim=0).mean(dim=0)  # [1, C, h, w]
+        return fused, base_h, base_w
 
     @torch.no_grad()
     def extract_mask_feature(
         self,
         image: Image.Image,
         mask: np.ndarray,
+        use_multiscale: bool = True,
+        use_bg_suppress: bool = True,
     ) -> np.ndarray:
         """
-        提取 Mask 区域的平均 patch 特征向量。
+        提取 Mask 区域的平均 patch 特征向量（增强版）。
+
+        增强策略：
+        1. 背景抑制：裁剪到 mask bbox + padding，排除背景干扰
+        2. 多尺度特征融合
+        3. 通道方差注意力加权
+        4. L2 归一化
 
         Args:
             image: PIL Image (RGB)
             mask: 布尔 numpy 数组，shape [H, W]
+            use_multiscale: 是否启用多尺度特征融合
+            use_bg_suppress: 是否启用背景抑制
 
         Returns:
             feature: L2 归一化的特征向量，shape [384]
@@ -116,31 +214,119 @@ class DINOEngine:
         if not self._warmed_up:
             self.warmup()
 
-        tensor = self._preprocess(image)
+        work_image = image
+        work_mask = mask
 
-        # 获取最后一层 patch tokens: [1, 384, h, w]
-        outputs = self.model.get_intermediate_layers(
-            tensor, n=1, reshape=True, return_class_token=False, norm=True
-        )
-        patch_feat_map = outputs[0]  # [1, 384, h, w]
-        _, c, h, w = patch_feat_map.shape
+        if use_bg_suppress:
+            ys, xs = np.where(mask)
+            if len(xs) > 0:
+                img_w, img_h = image.size
+                x1, y1 = int(xs.min()), int(ys.min())
+                x2, y2 = int(xs.max()), int(ys.max())
+                pad_x = int((x2 - x1) * DINO_BG_PAD_RATIO)
+                pad_y = int((y2 - y1) * DINO_BG_PAD_RATIO)
+                cx1 = max(0, x1 - pad_x)
+                cy1 = max(0, y1 - pad_y)
+                cx2 = min(img_w, x2 + pad_x)
+                cy2 = min(img_h, y2 + pad_y)
 
-        # 将 mask 缩放到 patch 网格大小
-        mask_t = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+                if (cx2 - cx1) > 32 and (cy2 - cy1) > 32:
+                    work_image = image.crop((cx1, cy1, cx2, cy2))
+                    work_mask = mask[cy1:cy2, cx1:cx2]
+
+        if use_multiscale:
+            patch_feat_map, h, w = self._extract_features_multiscale(work_image)
+        else:
+            patch_feat_map, h, w = self._extract_features_single(work_image)
+
+        patch_feat_map = self._channel_attention(patch_feat_map)
+        _, c, _, _ = patch_feat_map.shape
+
+        mask_t = torch.from_numpy(work_mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
         mask_resized = torch.nn.functional.interpolate(
             mask_t, size=(h, w), mode='bilinear', align_corners=False
         )
         mask_bool = (mask_resized.squeeze() > 0.5).to(self.device)
 
-        feat = patch_feat_map.squeeze(0)  # [384, h, w]
+        feat = patch_feat_map.squeeze(0)  # [C, h, w]
         if mask_bool.sum() > 0:
-            avg_feat = feat[:, mask_bool].mean(dim=1)  # [384]
+            avg_feat = feat[:, mask_bool].mean(dim=1)
         else:
-            avg_feat = feat.mean(dim=(1, 2))  # fallback
+            avg_feat = feat.mean(dim=(1, 2))
 
         avg_feat = avg_feat.float().cpu().numpy()
         avg_feat = avg_feat / (np.linalg.norm(avg_feat) + 1e-8)
         return avg_feat
+
+    @torch.no_grad()
+    def extract_multi_instance_feature(
+        self,
+        image: Image.Image,
+        instance_masks: list[np.ndarray],
+    ) -> np.ndarray:
+        """
+        多实例特征融合：提取多个实例的特征并取均值，生成统一目标特征模板。
+        用于模式3 多实例合并标注。
+
+        Args:
+            image: PIL Image (RGB)
+            instance_masks: 多个布尔 Mask 列表
+
+        Returns:
+            fused_feature: L2 归一化的融合特征向量，shape [384]
+        """
+        features = []
+        for mask in instance_masks:
+            feat = self.extract_mask_feature(image, mask)
+            features.append(feat)
+
+        if not features:
+            raise ValueError("No valid instance masks for feature extraction")
+
+        fused = np.mean(features, axis=0)
+        fused = fused / (np.linalg.norm(fused) + 1e-8)
+        return fused
+
+    @torch.no_grad()
+    def extract_multi_bbox_feature(
+        self,
+        image: Image.Image,
+        bboxes: list[list[float]],
+        sam_engine=None,
+    ) -> np.ndarray:
+        """
+        多框选参考特征融合（模式2 多 bbox）。
+        对每个 bbox 生成 Mask 后提取特征，取均值降低人工误差。
+
+        Args:
+            image: PIL Image (RGB)
+            bboxes: 多个 bbox [[x1,y1,x2,y2], ...]
+            sam_engine: SAMEngine 实例（可选，用于生成精准 Mask）
+
+        Returns:
+            fused_feature: L2 归一化的融合特征向量，shape [384]
+        """
+        features = []
+        for bbox in bboxes:
+            if sam_engine is not None:
+                mask = sam_engine.generate_mask(image, bbox)
+            else:
+                img_w, img_h = image.size
+                mask = np.zeros((img_h, img_w), dtype=bool)
+                x1, y1, x2, y2 = [int(v) for v in bbox]
+                mask[max(0, y1):min(img_h, y2), max(0, x1):min(img_w, x2)] = True
+
+            if mask.sum() < 10:
+                continue
+            feat = self.extract_mask_feature(image, mask)
+            features.append(feat)
+
+        if not features:
+            raise ValueError("No valid bboxes for feature extraction")
+
+        fused = np.mean(features, axis=0)
+        fused = fused / (np.linalg.norm(fused) + 1e-8)
+        return fused
 
     @torch.no_grad()
     def extract_patch_features(
@@ -148,86 +334,91 @@ class DINOEngine:
         image: Image.Image,
     ) -> tuple[np.ndarray, int, int]:
         """
-        提取图像所有 patch 的局部特征。
-
-        Args:
-            image: PIL Image (RGB)
+        提取图像所有 patch 的局部特征（含通道注意力加权）。
 
         Returns:
             features: L2 归一化的特征矩阵，shape [N_patches, 384]
-            h_patches: patch 网格高度
-            w_patches: patch 网格宽度
+            h_patches, w_patches: patch 网格尺寸
         """
         if not self._warmed_up:
             self.warmup()
 
-        tensor = self._preprocess(image)
-        outputs = self.model.get_intermediate_layers(
-            tensor, n=1, reshape=True, return_class_token=False, norm=True
-        )
-        patch_feat_map = outputs[0]  # [1, 384, h, w]
-        _, c, h, w = patch_feat_map.shape
+        patch_feat_map, h, w = self._extract_features_single(image)
+        patch_feat_map = self._channel_attention(patch_feat_map)
+        _, c, _, _ = patch_feat_map.shape
 
-        features = patch_feat_map.squeeze(0).reshape(c, -1).permute(1, 0)  # [h*w, 384]
+        features = patch_feat_map.squeeze(0).reshape(c, -1).permute(1, 0)
         features = features.float().cpu().numpy()
         norms = np.linalg.norm(features, axis=1, keepdims=True) + 1e-8
         features = features / norms
         return features, h, w
+
+    def _compute_dynamic_threshold(
+        self,
+        area_ratio: float,
+    ) -> float:
+        """
+        根据目标面积比自适应调整余弦相似度阈值。
+        大目标特征稳定 → 阈值略高；小目标特征稀疏 → 阈值略低提升召回。
+
+        Args:
+            area_ratio: 目标面积占图片总面积的比例
+
+        Returns:
+            threshold: 自适应余弦相似度阈值
+        """
+        if area_ratio >= COSINE_SIM_AREA_CUTOFF:
+            return COSINE_SIM_LARGE_THRESH
+        t = area_ratio / COSINE_SIM_AREA_CUTOFF
+        return COSINE_SIM_SMALL_THRESH + t * (COSINE_SIM_LARGE_THRESH - COSINE_SIM_SMALL_THRESH)
 
     def match_in_image(
         self,
         image: Image.Image,
         template_feature: np.ndarray,
         threshold: float = COSINE_SIMILARITY_THRESHOLD,
+        ref_area_ratio: float | None = None,
     ) -> tuple[np.ndarray, list[list[float]]]:
         """
-        在目标图像中匹配模板特征，返回匹配区域的 Mask 和 bbox 列表。
-
-        流程：
-        1. 提取目标图 patch 特征
-        2. 计算余弦相似度
-        3. 阈值过滤 → 空间 Mask
-        4. 连通域分析 → 分离不同实例
-        5. 返回每个实例的 bbox
+        在目标图像中匹配模板特征（增强版：动态阈值 + 自适应小区域过滤）。
 
         Args:
-            image: 目标图像 PIL Image
-            template_feature: 模板特征向量，shape [384]
-            threshold: 余弦相似度阈值
+            image: 目标图像
+            template_feature: 模板特征向量
+            threshold: 余弦相似度阈值（可被动态阈值覆盖）
+            ref_area_ratio: 参考目标面积比（用于动态阈值，None 则使用固定阈值）
 
         Returns:
-            match_mask: 布尔数组，shape [H_img, W_img]，所有匹配区域
-            bboxes: 每个连通域的 bbox [[x1,y1,x2,y2], ...]
+            match_mask, bboxes
         """
         import cv2
         from scipy import ndimage
 
+        if ref_area_ratio is not None:
+            threshold = self._compute_dynamic_threshold(ref_area_ratio)
+
         patch_feats, h, w = self.extract_patch_features(image)
         img_w, img_h = image.size
 
-        # 余弦相似度（特征已 L2 归一化，点积即余弦）
-        similarities = patch_feats @ template_feature  # [h*w]
+        similarities = patch_feats @ template_feature
         match_patches = (similarities >= threshold).reshape(h, w)
 
         if not match_patches.any():
             return np.zeros((img_h, img_w), dtype=bool), []
 
-        # 上采样到原图大小
         match_full = cv2.resize(
             match_patches.astype(np.uint8), (img_w, img_h),
             interpolation=cv2.INTER_NEAREST
         ).astype(bool)
 
-        # 连通域分析
         labeled, num_features = ndimage.label(match_full)
         bboxes = []
 
-        # 动态小区域过滤阈值：基于原图分辨率自适应
         min_area = max(50, int(img_w * img_h / 10000))
 
         for label_id in range(1, num_features + 1):
             region = (labeled == label_id)
-            if region.sum() < min_area:  # 动态阈值过滤
+            if region.sum() < min_area:
                 continue
             ys, xs = np.where(region)
             bboxes.append([float(xs.min()), float(ys.min()),
@@ -239,26 +430,19 @@ class DINOEngine:
     def extract_patch_features_clustering(
         self,
         image: Image.Image,
-        n_clusters: int = DINO_CLUSTER_NUM,
+        n_clusters: int | None = None,
+        use_elbow: bool = True,
     ) -> tuple[np.ndarray, list[np.ndarray], int, int]:
         """
-        全图 patch 特征 K-Means 聚类，用于模式3 粗分割实例生成。
-
-        流程：
-        1. 提取全图 patch 特征 [N, 384]
-        2. K-Means 聚类为 n_clusters 个簇
-        3. 将聚类标签映射回 patch 网格 → 上采样到原图大小
-        4. 每个簇作为一个粗分割实例
+        全图 patch 特征 K-Means 聚类（增强版：肘部法则自适应聚类数）。
 
         Args:
             image: PIL Image (RGB)
-            n_clusters: 聚类数量，默认 8
+            n_clusters: 聚类数量，None 且 use_elbow=True 时自动选择
+            use_elbow: 是否使用肘部法则自动确定聚类数
 
         Returns:
-            cluster_map: 聚类标签图，shape [H_img, W_img]，值 0~n_clusters-1
-            instance_masks: 每个簇的布尔 Mask 列表，shape [H_img, W_img]
-            h_patches: patch 网格高度
-            w_patches: patch 网格宽度
+            cluster_map, instance_masks, h_patches, w_patches
         """
         from sklearn.cluster import KMeans
         import cv2
@@ -269,28 +453,69 @@ class DINOEngine:
         img_w, img_h = image.size
         patch_feats, h, w = self.extract_patch_features(image)
 
-        # K-Means 聚类
+        if n_clusters is None and use_elbow:
+            n_clusters = self._elbow_optimal_k(patch_feats)
+        elif n_clusters is None:
+            n_clusters = DINO_CLUSTER_NUM
+
         kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10, max_iter=100)
-        labels = kmeans.fit_predict(patch_feats)  # [h*w]
+        labels = kmeans.fit_predict(patch_feats)
         label_grid = labels.reshape(h, w)
 
-        # 上采样到原图大小
         cluster_map = cv2.resize(
             label_grid.astype(np.uint8), (img_w, img_h),
             interpolation=cv2.INTER_NEAREST
         )
 
-        # 生成每个簇的布尔 Mask
         instance_masks = []
+        total_pixels = img_w * img_h
         for cid in range(n_clusters):
             mask = (cluster_map == cid)
-            # 过滤面积过小的簇（< 原图面积的 0.5%）
-            if mask.sum() > img_w * img_h * 0.005:
+            ratio = mask.sum() / total_pixels
+            if ratio >= DINO_MIN_CLUSTER_RATIO:
                 instance_masks.append(mask)
 
         logger.info("[DINOv3] Clustering: %d clusters → %d valid instances",
                     n_clusters, len(instance_masks))
         return cluster_map, instance_masks, h, w
+
+    def _elbow_optimal_k(self, features: np.ndarray) -> int:
+        """
+        肘部法则自动选择最优聚类数。
+        计算 K=2~ELBOW_MAX_K 的惯性，找到惯性下降速率变化最大的拐点。
+
+        Args:
+            features: patch 特征矩阵 [N, 384]
+
+        Returns:
+            optimal_k: 最优聚类数
+        """
+        from sklearn.cluster import KMeans
+
+        max_k = min(DINO_ELBOW_MAX_K, len(features) // 2)
+        if max_k < 3:
+            return DINO_CLUSTER_NUM
+
+        inertias = []
+        k_range = range(2, max_k + 1)
+
+        for k in k_range:
+            km = KMeans(n_clusters=k, random_state=42, n_init=5, max_iter=50)
+            km.fit(features)
+            inertias.append(km.inertia_)
+
+        if len(inertias) < 3:
+            return DINO_CLUSTER_NUM
+
+        diffs = np.diff(inertias)
+        diffs2 = np.diff(diffs)
+
+        optimal_idx = np.argmax(diffs2) + 2
+        optimal_k = list(k_range)[optimal_idx] if optimal_idx < len(k_range) else DINO_CLUSTER_NUM
+
+        optimal_k = max(2, min(optimal_k, max_k))
+        logger.info("[DINOv3] Elbow method: optimal K=%d (range 2~%d)", optimal_k, max_k)
+        return optimal_k
 
     @torch.no_grad()
     def extract_instance_feature(
@@ -298,21 +523,10 @@ class DINOEngine:
         image: Image.Image,
         instance_mask: np.ndarray,
     ) -> np.ndarray:
-        """
-        提取指定实例 Mask 区域的全局特征模板（模式3 选中实例后调用）。
-        与 extract_mask_feature 逻辑一致，独立方法便于语义区分。
-
-        Args:
-            image: PIL Image (RGB)
-            instance_mask: 布尔 numpy 数组，shape [H, W]
-
-        Returns:
-            feature: L2 归一化的特征向量，shape [384]
-        """
+        """提取指定实例 Mask 区域的全局特征模板（模式3 选中实例后调用）。"""
         return self.extract_mask_feature(image, instance_mask)
 
     def release_memory(self) -> None:
-        """释放 GPU 显存"""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
