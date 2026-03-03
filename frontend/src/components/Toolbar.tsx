@@ -14,6 +14,7 @@ import {
   ClearOutlined, UploadOutlined, FontSizeOutlined, AimOutlined,
   ThunderboltOutlined, AppstoreOutlined, SearchOutlined,
   CheckOutlined, BorderOutlined, UndoOutlined, RedoOutlined, ScissorOutlined,
+  ZoomInOutlined as ZoomInBtn, ZoomOutOutlined, FullscreenOutlined,
 } from '@ant-design/icons';
 import { useAppStore, ToolType, AnnotationMode } from '../store/useAppStore';
 import {
@@ -260,6 +261,20 @@ const Toolbar: React.FC = () => {
       {/* ===== 模式2 ===== */}
       {currentMode === 'mode2' && (
         <>
+          <div style={{ color: '#999', fontSize: 12 }}>标注类别（必选）</div>
+          <Select
+            value={activeCategoryId || undefined}
+            onChange={(v) => setActiveCategoryId(v)}
+            placeholder="请先选择/新建类别"
+            size="small"
+            style={{ width: '100%', marginBottom: 4 }}
+            status={!activeCategoryId ? 'warning' : undefined}
+            options={categories.map(c => ({
+              value: c.id,
+              label: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ width: 10, height: 10, borderRadius: 2, background: c.color, display: 'inline-block' }} />{c.name}</span>,
+            }))}
+          />
           <div style={{ color: '#999', fontSize: 12, marginBottom: 4 }}>画布工具</div>
           <Space wrap>
             {tools.map(t => (
@@ -295,6 +310,20 @@ const Toolbar: React.FC = () => {
       {/* ===== 模式3 ===== */}
       {currentMode === 'mode3' && (
         <>
+          <div style={{ color: '#999', fontSize: 12 }}>标注类别（必选）</div>
+          <Select
+            value={activeCategoryId || undefined}
+            onChange={(v) => setActiveCategoryId(v)}
+            placeholder="请先选择/新建类别"
+            size="small"
+            style={{ width: '100%', marginBottom: 4 }}
+            status={!activeCategoryId ? 'warning' : undefined}
+            options={categories.map(c => ({
+              value: c.id,
+              label: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ width: 10, height: 10, borderRadius: 2, background: c.color, display: 'inline-block' }} />{c.name}</span>,
+            }))}
+          />
           <Button icon={<SearchOutlined />} onClick={handleMode3Discovery}
             disabled={isAnnotating || !selectedImageId} block>生成实例</Button>
           {instanceMasks.length > 0 && (
@@ -349,7 +378,18 @@ const Toolbar: React.FC = () => {
         <div style={{ color: '#fa8c16', fontSize: 11, marginTop: 2 }}>画布框选→自动 SAM3 生成 Mask</div>
       )}
 
-      {/* 底部区域 */}
+      {/* ===== 缩放控制 ===== */}
+      <Divider style={{ margin: '4px 0', borderColor: '#444' }} />
+      <div style={{ color: '#999', fontSize: 12 }}>视图缩放</div>
+      <Space>
+        <Tooltip title="放大"><Button size="small" icon={<ZoomInBtn />}
+          onClick={() => useAppStore.getState().setStageScale(Math.min(5, useAppStore.getState().stageScale * 1.2))} /></Tooltip>
+        <Tooltip title="缩小"><Button size="small" icon={<ZoomOutOutlined />}
+          onClick={() => useAppStore.getState().setStageScale(Math.max(0.1, useAppStore.getState().stageScale / 1.2))} /></Tooltip>
+        <Tooltip title="还原"><Button size="small" icon={<FullscreenOutlined />}
+          onClick={() => { useAppStore.getState().setStageScale(1); useAppStore.getState().setStagePosition({ x: 0, y: 0 }); }} /></Tooltip>
+      </Space>
+
       <div style={{ flex: 1 }} />
 
       <Divider style={{ margin: '4px 0', borderColor: '#444' }} />

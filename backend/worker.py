@@ -399,6 +399,7 @@ def process_batch_annotation(
                     coco_annotations.append({
                         "id": annotation_id, "image_id": img_id,
                         "category_id": cat["category_id"], "category_name": cat["name"],
+                        "category_rgb": list(cat["color"]),
                         "bbox": coco_bbox, "segmentation": mask_to_polygon(precise_mask),
                         "area": float(precise_mask.sum()), "iscrowd": 0,
                     })
@@ -641,6 +642,7 @@ def process_instance_annotation(
                     coco_annotations.append({
                         "id": annotation_id, "image_id": img_id,
                         "category_id": cat["category_id"], "category_name": cat["name"],
+                        "category_rgb": list(cat["color"]),
                         "bbox": coco_bbox, "segmentation": mask_to_polygon(precise_mask),
                         "area": float(precise_mask.sum()), "iscrowd": 0,
                     })

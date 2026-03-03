@@ -7,6 +7,7 @@ import React, { useRef, useState } from 'react';
 import { Button, Tag, Popconfirm, Input, Tooltip } from 'antd';
 import { PlusOutlined, DeleteOutlined, EditOutlined, CheckOutlined } from '@ant-design/icons';
 import { useAppStore } from '../store/useAppStore';
+import { getNextAvailableColor } from '../utils/categoryColorMap';
 
 const CategoryPanel: React.FC = () => {
   const {
@@ -22,7 +23,9 @@ const CategoryPanel: React.FC = () => {
   const handleAdd = () => {
     const name = nameRef.current?.value?.trim();
     if (!name) return;
-    addCategory(name);
+    const usedColors = categories.map(c => c.color);
+    const color = getNextAvailableColor(usedColors);
+    addCategory(name, color);
     if (nameRef.current) nameRef.current.value = '';
   };
 

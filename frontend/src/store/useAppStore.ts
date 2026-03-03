@@ -130,6 +130,10 @@ interface AppState {
   mode3CategoryRefs: Mode3CategoryRef[];
   stageScale: number;
   stagePosition: { x: number; y: number };
+  // 图片自适应渲染参数（切图时自动重算）
+  imageFitScale: number;
+  imageFitOffsetX: number;
+  imageFitOffsetY: number;
   refImages: RefImageInfo[];
   imageScores: Record<string, ImageScore>;
   scoreFilter: ScoreFilter;
@@ -177,6 +181,7 @@ interface AppState {
   confirmMode2Bbox: () => void;
   clearBboxAfterAnnotate: () => void;
   setMode3CategoryInstances: (categoryId: string, instanceIds: number[]) => void;
+  setImageFit: (scale: number, offsetX: number, offsetY: number) => void;
   // 多参考图
   addRefImage: (imageId: string) => void;
   removeRefImage: (imageId: string) => void;
@@ -231,6 +236,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   mode3CategoryRefs: [],
   stageScale: 1,
   stagePosition: { x: 0, y: 0 },
+  imageFitScale: 1,
+  imageFitOffsetX: 0,
+  imageFitOffsetY: 0,
   refImages: [],
   imageScores: {},
   scoreFilter: 'all',
@@ -390,6 +398,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       return { mode3CategoryRefs: refs };
     }),
+
+  setImageFit: (scale, offsetX, offsetY) =>
+    set({ imageFitScale: scale, imageFitOffsetX: offsetX, imageFitOffsetY: offsetY }),
 
   // ===== 多参考图 =====
   addRefImage: (imageId) =>
