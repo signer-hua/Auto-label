@@ -378,18 +378,20 @@ class DINOEngine:
         template_feature: np.ndarray,
         threshold: float = COSINE_SIMILARITY_THRESHOLD,
         ref_area_ratio: float | None = None,
-    ) -> tuple[np.ndarray, list[list[float]]]:
+        return_similarities: bool = False,
+    ) -> tuple[np.ndarray, list[list[float]]] | tuple[np.ndarray, list[list[float]], list[float]]:
         """
         在目标图像中匹配模板特征（增强版：动态阈值 + 自适应小区域过滤）。
 
         Args:
             image: 目标图像
             template_feature: 模板特征向量
-            threshold: 余弦相似度阈值（可被动态阈值覆盖）
-            ref_area_ratio: 参考目标面积比（用于动态阈值，None 则使用固定阈值）
+            threshold: 余弦相似度阈值
+            ref_area_ratio: 参考目标面积比（动态阈值）
+            return_similarities: 是否返回每个匹配区域的平均相似度
 
         Returns:
-            match_mask, bboxes
+            match_mask, bboxes[, sim_values]
         """
         import cv2
         from scipy import ndimage
@@ -401,9 +403,12 @@ class DINOEngine:
         img_w, img_h = image.size
 
         similarities = patch_feats @ template_feature
-        match_patches = (similarities >= threshold).reshape(h, w)
+        sim_grid = similarities.reshape(h, w)
+        match_patches = (sim_grid >= threshold)
 
         if not match_patches.any():
+            if return_similarities:
+                return np.zeros((img_h, img_w), dtype=bool), [], []
             return np.zeros((img_h, img_w), dtype=bool), []
 
         match_full = cv2.resize(
@@ -413,6 +418,12 @@ class DINOEngine:
 
         labeled, num_features = ndimage.label(match_full)
         bboxes = []
+        sim_values = []
+
+        label_grid = cv2.resize(
+            ndimage.label(match_patches.astype(np.uint8))[0].astype(np.uint8),
+            (img_w, img_h), interpolation=cv2.INTER_NEAREST
+        ) if return_similarities else None
 
         min_area = max(50, int(img_w * img_h / 10000))
 
@@ -424,6 +435,16 @@ class DINOEngine:
             bboxes.append([float(xs.min()), float(ys.min()),
                            float(xs.max()), float(ys.max())])
 
+            if return_similarities:
+                region_sim = cv2.resize(
+                    sim_grid.astype(np.float32), (img_w, img_h),
+                    interpolation=cv2.INTER_LINEAR
+                )
+                avg_sim = float(region_sim[region].mean())
+                sim_values.append(avg_sim)
+
+        if return_similarities:
+            return match_full, bboxes, sim_values
         return match_full, bboxes
 
     @torch.no_grad()
@@ -516,6 +537,43 @@ class DINOEngine:
         optimal_k = max(2, min(optimal_k, max_k))
         logger.info("[DINOv3] Elbow method: optimal K=%d (range 2~%d)", optimal_k, max_k)
         return optimal_k
+
+    def fuse_multi_ref_features(
+        self,
+        ref_features: list[np.ndarray],
+        weights: list[float] | None = None,
+    ) -> np.ndarray:
+        """
+        多参考图特征加权融合。
+        对来自不同参考图的特征向量按权重加权平均后 L2 归一化。
+
+        Args:
+            ref_features: 各参考图特征向量列表，每个 shape [384]
+            weights: 权重列表（自动归一化），None 则均分
+
+        Returns:
+            fused: L2 归一化的融合特征，shape [384]
+        """
+        if not ref_features:
+            raise ValueError("No reference features to fuse")
+
+        if len(ref_features) == 1:
+            return ref_features[0]
+
+        if weights is None:
+            weights = [1.0] * len(ref_features)
+
+        total_w = sum(weights)
+        norm_w = [w / total_w for w in weights]
+
+        fused = np.zeros_like(ref_features[0])
+        for feat, w in zip(ref_features, norm_w):
+            fused += feat * w
+
+        fused = fused / (np.linalg.norm(fused) + 1e-8)
+        logger.info("[DINOv3] Fused %d ref features with weights %s",
+                    len(ref_features), [round(w, 2) for w in norm_w])
+        return fused
 
     @torch.no_grad()
     def extract_instance_feature(

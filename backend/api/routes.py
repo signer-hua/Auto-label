@@ -53,19 +53,28 @@ class Mode1Request(BaseModel):
     image_paths: list[str] = Field(..., description="待标注图像路径列表")
 
 
+class RefImageItem(BaseModel):
+    """多参考图项"""
+    path: str = Field(..., description="参考图本地路径")
+    bbox: list[float] = Field(..., description="框选坐标 [x1,y1,x2,y2]")
+    weight: float = Field(default=1.0, description="参考图权重（0.1~2.0）")
+
+
 class CategoryBboxRef(BaseModel):
     """多类别框选参考"""
     name: str = Field(..., description="类别名称")
     bboxes: list[list[float]] = Field(..., description="框选坐标列表 [[x1,y1,x2,y2], ...]")
+    ref_images: list[RefImageItem] | None = Field(None, description="多参考图列表")
 
 
 class Mode2Request(BaseModel):
-    """模式2 标注请求（支持多类别）"""
+    """模式2 标注请求（支持多类别 + 多参考图）"""
     ref_image_id: str = Field(..., description="首图（参考图）ID")
     ref_image_path: str = Field(..., description="首图本地路径")
     bbox: list[float] = Field(default=[], description="单类别框选坐标 [x1,y1,x2,y2]（向后兼容）")
     target_images: list[dict] = Field(..., description="待标注图像列表 [{id, path}]")
-    categories: list[CategoryBboxRef] | None = Field(None, description="多类别参考（可选，覆盖 bbox）")
+    categories: list[CategoryBboxRef] | None = Field(None, description="多类别参考（可选）")
+    ref_images: list[RefImageItem] | None = Field(None, description="多参考图列表（单类别模式）")
 
 
 class Mode3DiscoveryRequest(BaseModel):
@@ -81,13 +90,21 @@ class CategoryInstanceRef(BaseModel):
 
 
 class Mode3SelectRequest(BaseModel):
-    """模式3 阶段2：选中实例跨图标注请求（支持多类别 + 多实例）"""
+    """模式3 阶段2：选中实例跨图标注请求（支持多类别 + 多实例 + 多参考图）"""
     discovery_task_id: str = Field(..., description="阶段1 的 task_id")
     ref_image_id: str = Field(..., description="参考图 ID")
     ref_image_path: str = Field(..., description="参考图本地路径")
     selected_instance_id: int = Field(default=0, description="单实例 ID（向后兼容）")
     target_images: list[dict] = Field(..., description="待标注图像列表 [{id, path}]")
-    categories: list[CategoryInstanceRef] | None = Field(None, description="多类别参考（可选，覆盖 selected_instance_id）")
+    categories: list[CategoryInstanceRef] | None = Field(None, description="多类别参考（可选）")
+    ref_images: list[RefImageItem] | None = Field(None, description="多参考图列表（单类别模式）")
+
+
+class ManualSamRequest(BaseModel):
+    """手动标注触发 SAM3 请求"""
+    image_id: str = Field(..., description="图片 ID")
+    image_path: str = Field(..., description="图片路径")
+    bbox: list[float] = Field(..., description="手动框选坐标 [x1,y1,x2,y2]")
 
 
 class TaskStatusResponse(BaseModel):
@@ -100,8 +117,10 @@ class TaskStatusResponse(BaseModel):
     mode: Optional[str] = None
     mask_urls: Optional[dict] = None
     export_url: Optional[str] = None
-    instance_masks: Optional[list] = None  # 模式3 阶段1 实例列表
-    error_type: Optional[str] = None       # gpu_oom 等
+    instance_masks: Optional[list] = None
+    error_type: Optional[str] = None
+    image_scores: Optional[dict] = None   # 每图置信度评分 {img_id: {total, ...}}
+    mask_url: Optional[str] = None        # 手动标注单个 Mask URL
 
 
 # ==================== 接口实现 ====================
@@ -207,17 +226,23 @@ async def annotate_mode2(req: Mode2Request):
 
     cats_json = None
     if req.categories:
-        cats_json = [{"name": c.name, "bboxes": c.bboxes} for c in req.categories]
+        cats_json = [{"name": c.name, "bboxes": c.bboxes,
+                      "ref_images": [ri.model_dump() for ri in c.ref_images] if c.ref_images else []}
+                     for c in req.categories]
+
+    refs_json = None
+    if req.ref_images:
+        refs_json = [ri.model_dump() for ri in req.ref_images]
 
     from backend.worker import process_batch_annotation
     process_batch_annotation.delay(
         ref_image_path=req.ref_image_path, bbox=req.bbox,
         target_image_paths=target_paths, target_image_ids=target_ids,
-        task_id=task_id, categories=cats_json,
+        task_id=task_id, categories=cats_json, ref_images=refs_json,
     )
-    logger.info("Mode2 task: %s (ref=%s, targets=%d, categories=%d)",
+    logger.info("Mode2 task: %s (ref=%s, targets=%d, refs=%d)",
                 task_id, req.ref_image_id, len(req.target_images),
-                len(req.categories) if req.categories else 1)
+                len(req.ref_images) if req.ref_images else 1)
     return {"task_id": task_id, "status": "pending", "mode": "mode2"}
 
 
@@ -271,6 +296,10 @@ async def annotate_mode3_select(req: Mode3SelectRequest):
     if req.categories:
         cats_json = [{"name": c.name, "instance_ids": c.instance_ids} for c in req.categories]
 
+    refs_json = None
+    if req.ref_images:
+        refs_json = [ri.model_dump() for ri in req.ref_images]
+
     from backend.worker import process_instance_annotation
     process_instance_annotation.delay(
         ref_image_path=req.ref_image_path,
@@ -279,11 +308,10 @@ async def annotate_mode3_select(req: Mode3SelectRequest):
         target_image_paths=target_paths,
         target_image_ids=target_ids,
         task_id=task_id,
-        categories=cats_json,
+        categories=cats_json, ref_images=refs_json,
     )
-    logger.info("Mode3 select task: %s (instance=%d, targets=%d, categories=%d)",
-                task_id, req.selected_instance_id, len(req.target_images),
-                len(req.categories) if req.categories else 1)
+    logger.info("Mode3 select task: %s (instance=%d, targets=%d)",
+                task_id, req.selected_instance_id, len(req.target_images))
     return {"task_id": task_id, "status": "pending", "mode": "mode3"}
 
 
@@ -365,6 +393,13 @@ async def get_task_status(task_id: str):
         except json.JSONDecodeError:
             instance_masks = None
 
+    image_scores = None
+    if "image_scores" in task_data:
+        try:
+            image_scores = json.loads(task_data["image_scores"])
+        except json.JSONDecodeError:
+            image_scores = None
+
     return TaskStatusResponse(
         task_id=task_id,
         status=task_data.get("status", "unknown"),
@@ -376,6 +411,8 @@ async def get_task_status(task_id: str):
         export_url=task_data.get("export_url"),
         instance_masks=instance_masks,
         error_type=task_data.get("error_type"),
+        image_scores=image_scores,
+        mask_url=task_data.get("mask_url"),
     )
 
 
@@ -466,3 +503,25 @@ async def export_annotations(task_id: str, fmt: str):
 
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported format: {fmt}. Use coco/voc/yolo.")
+
+
+# ==================== 手动标注：单框触发 SAM3 ====================
+
+@router.post("/annotate/manual")
+async def annotate_manual(req: ManualSamRequest):
+    """手动框选 → SAM3 生成 Mask（轻量快速任务）"""
+    task_id = uuid.uuid4().hex
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending", "progress": 0, "total": 1,
+        "message": "Generating manual mask...", "mode": "manual",
+    })
+    r.expire(f"task:{task_id}", 3600)
+
+    from backend.worker import process_manual_sam
+    process_manual_sam.delay(
+        image_path=req.image_path, image_id=req.image_id,
+        bbox=req.bbox, task_id=task_id,
+    )
+    logger.info("Manual SAM task: %s (image=%s)", task_id, req.image_id)
+    return {"task_id": task_id, "status": "pending", "mode": "manual"}

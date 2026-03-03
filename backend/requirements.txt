@@ -48,6 +48,7 @@ regex
 timm>=1.0.17
 huggingface_hub
 pycocotools
+psutil>=5.9.0
 
 # ==================== 8. Grounding DINO 依赖（transformers 版，无 MM 系列依赖） ====================
 transformers>=4.40.0

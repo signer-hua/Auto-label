@@ -136,6 +136,17 @@ MULTI_CATEGORY_COLORS = [
     (180, 180, 0),    # 橄榄
 ]
 
+# ==================== 多参考图配置 ====================
+MAX_REF_IMAGES = int(os.getenv("MAX_REF_IMAGES", "5"))
+DEFAULT_REF_WEIGHT = float(os.getenv("DEFAULT_REF_WEIGHT", "1.0"))
+AUX_REF_WEIGHT = float(os.getenv("AUX_REF_WEIGHT", "0.8"))
+
+# ==================== 置信度评分权重 ====================
+SCORE_WEIGHT_SIMILARITY = float(os.getenv("SCORE_W_SIM", "0.40"))
+SCORE_WEIGHT_MASK_COVERAGE = float(os.getenv("SCORE_W_COV", "0.35"))
+SCORE_WEIGHT_AREA = float(os.getenv("SCORE_W_AREA", "0.15"))
+SCORE_WEIGHT_DETECTION = float(os.getenv("SCORE_W_DET", "0.10"))
+
 # ==================== Redis 任务过期时间 ====================
 REDIS_TASK_EXPIRE = int(os.getenv("REDIS_TASK_EXPIRE", "86400"))  # 默认 24 小时
 

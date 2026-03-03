@@ -9,7 +9,11 @@ import pkg_resources
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
-from iopath.common.file_io import g_pathmgr
+
+try:
+    from iopath.common.file_io import g_pathmgr
+except ImportError:
+    g_pathmgr = None
 from sam3.model.decoder import (
     TransformerDecoder,
     TransformerDecoderLayer,
@@ -37,7 +41,6 @@ from sam3.model.sam1_task_predictor import SAM3InteractiveImagePredictor
 from sam3.model.sam3_image import Sam3Image, Sam3ImageOnVideoMultiGPU
 from sam3.model.sam3_tracking_predictor import Sam3TrackerPredictor
 from sam3.model.sam3_video_inference import Sam3VideoInferenceWithInstanceInteractivity
-from sam3.model.sam3_video_predictor import Sam3VideoPredictorMultiGPU
 from sam3.model.text_encoder_ve import VETextEncoder
 from sam3.model.tokenizer_ve import SimpleTokenizer
 from sam3.model.vitdet import ViT
@@ -525,7 +528,8 @@ def _create_sam3_transformer(has_presence_token: bool = True) -> TransformerWrap
 
 def _load_checkpoint(model, checkpoint_path):
     """Load model checkpoint from file."""
-    with g_pathmgr.open(checkpoint_path, "rb") as f:
+    _open = g_pathmgr.open if g_pathmgr is not None else open
+    with _open(checkpoint_path, "rb") as f:
         ckpt = torch.load(f, map_location="cpu", weights_only=True)
     if "model" in ckpt and isinstance(ckpt["model"], dict):
         ckpt = ckpt["model"]
@@ -774,7 +778,8 @@ def build_sam3_video_model(
     if load_from_HF and checkpoint_path is None:
         checkpoint_path = download_ckpt_from_hf()
     if checkpoint_path is not None:
-        with g_pathmgr.open(checkpoint_path, "rb") as f:
+        _open = g_pathmgr.open if g_pathmgr is not None else open
+        with _open(checkpoint_path, "rb") as f:
             ckpt = torch.load(f, map_location="cpu", weights_only=True)
         if "model" in ckpt and isinstance(ckpt["model"], dict):
             ckpt = ckpt["model"]
@@ -792,6 +797,7 @@ def build_sam3_video_model(
 
 
 def build_sam3_video_predictor(*model_args, gpus_to_use=None, **model_kwargs):
+    from sam3.model.sam3_video_predictor import Sam3VideoPredictorMultiGPU
     return Sam3VideoPredictorMultiGPU(
         *model_args, gpus_to_use=gpus_to_use, **model_kwargs
     )

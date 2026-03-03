@@ -2,7 +2,7 @@
 Grounding DINO 单例引擎
 负责：基于文本提示的开放词汇目标检测。
 采用 HuggingFace transformers 库加载模型，无需 MMDetection/MMEngine 依赖。
-单例模式，Celery Worker 启动时预热加载到 GPU (float16)。
+单例模式，Celery Worker 启动时预热加载到 GPU (float32 + autocast 自动混合精度)。
 
 核心方法：
     - warmup(): Worker 启动时调用，加载模型到 GPU
@@ -65,8 +65,11 @@ class GroundingDINOEngine:
 
     def warmup(self) -> None:
         """
-        预热模型：加载 Grounding DINO 到 GPU，转为 float16 半精度。
-        应在 Celery Worker 启动时调用一次。
+        预热模型：加载 Grounding DINO 到 GPU (float32)，推理时用 autocast 自动混合精度。
+
+        Grounding DINO 的 text_enhancer_layer 内部会将位置编码强制转为 float32，
+        如果模型权重是 float16 会导致 dtype 不匹配。因此用 float32 加载模型，
+        推理时通过 torch.autocast 让 GPU 自动选择最优精度。
 
         model_name 可以是 HuggingFace Hub 名称（如 IDEA-Research/grounding-dino-base），
         也可以是本地已下载的模型目录路径。首次使用 Hub 名称时会自动下载权重。
@@ -81,12 +84,14 @@ class GroundingDINOEngine:
 
         self.processor = AutoProcessor.from_pretrained(self.model_name)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(
-            self.model_name, torch_dtype=torch.float16
+            self.model_name,
+            torch_dtype=torch.float32,
+            low_cpu_mem_usage=False,
         )
         self.model = self.model.to(self.device).eval()
 
         self._warmed_up = True
-        logger.info("[Grounding DINO] Model warmed up successfully (float16).")
+        logger.info("[Grounding DINO] Model warmed up successfully (float32 + autocast).")
 
     @staticmethod
     def _normalize_text_prompts(text_prompts: list[str]) -> tuple[str, list[str]]:
@@ -153,15 +158,13 @@ class GroundingDINOEngine:
         inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                   for k, v in inputs.items()}
 
-        if 'pixel_values' in inputs:
-            inputs['pixel_values'] = inputs['pixel_values'].half()
-
-        outputs = self.model(**inputs)
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            outputs = self.model(**inputs)
 
         results = self.processor.post_process_grounded_object_detection(
             outputs,
-            inputs["input_ids"],
-            box_threshold=self.box_thr,
+            input_ids=inputs["input_ids"],
+            threshold=self.box_thr,
             text_threshold=threshold,
             target_sizes=[image.size[::-1]],  # (height, width)
         )[0]
