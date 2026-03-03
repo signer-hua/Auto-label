@@ -47,10 +47,19 @@ class UploadResponse(BaseModel):
 
 
 class Mode1Request(BaseModel):
-    """模式1 文本标注请求"""
-    text_prompt: str = Field(..., description="文本提示，如 'person, car, dog'")
+    """模式1 文本标注请求（支持全局类别绑定）"""
+    text_prompt: str = Field(..., description="文本提示，支持逗号分隔或完整句子")
     image_ids: list[str] = Field(..., description="待标注图像 ID 列表")
     image_paths: list[str] = Field(..., description="待标注图像路径列表")
+    category_name: str | None = Field(None, description="绑定的全局类别名称")
+    category_color: str | None = Field(None, description="绑定的全局类别颜色 hex")
+
+
+class PreviewRequest(BaseModel):
+    """模式1 目标预览请求（轻量检测，不生成 Mask）"""
+    text_prompt: str = Field(..., description="文本提示")
+    image_id: str = Field(..., description="图片 ID")
+    image_path: str = Field(..., description="图片路径")
 
 
 class RefImageItem(BaseModel):
@@ -203,9 +212,39 @@ async def annotate_mode1(req: Mode1Request):
     process_text_annotation.delay(
         image_paths=req.image_paths, image_ids=req.image_ids,
         text_prompt=text, task_id=task_id,
+        category_name=req.category_name,
+        category_color=req.category_color,
     )
-    logger.info("Mode1 task: %s (prompt='%s', images=%d)", task_id, text, len(req.image_ids))
+    logger.info("Mode1 task: %s (prompt='%s', images=%d, cat=%s)",
+                task_id, text, len(req.image_ids), req.category_name)
     return {"task_id": task_id, "status": "pending", "mode": "mode1"}
+
+
+# ==================== 模式1 目标预览（轻量检测） ====================
+
+@router.post("/annotate/preview")
+async def annotate_preview(req: PreviewRequest):
+    """模式1 目标预览：仅运行 Grounding DINO 检测，返回目标框（不生成 Mask）。"""
+    from backend.models.grounding_dino_engine import GroundingDINOEngine
+    from PIL import Image
+
+    text = req.text_prompt.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text prompt cannot be empty")
+
+    gd = GroundingDINOEngine.get_instance()
+    if not gd._warmed_up:
+        raise HTTPException(status_code=503, detail="Model not ready, please wait for worker warmup")
+
+    target_image = Image.open(req.image_path).convert("RGB")
+    categories = [c.strip() for c in
+                  text.replace('，', ',').replace('、', ',').replace('；', ',').split(',')
+                  if c.strip()]
+    if not categories:
+        categories = [text]
+
+    detections = gd.detect(target_image, categories)
+    return {"detections": detections}
 
 
 # ==================== 模式2：框选批量标注 ====================

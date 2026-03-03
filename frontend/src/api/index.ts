@@ -70,11 +70,25 @@ export async function uploadImages(files: File[]): Promise<UploadResponse[]> {
   return results;
 }
 
-// ===== 模式1 =====
+// ===== 模式1（支持全局类别绑定） =====
 export async function startMode1Annotation(params: {
-  text_prompt: string; image_ids: string[]; image_paths: string[];
+  text_prompt: string;
+  image_ids: string[];
+  image_paths: string[];
+  category_name?: string | null;
+  category_color?: string | null;
 }): Promise<{ task_id: string; status: string; mode: string }> {
   const { data } = await api.post('/annotate/mode1', params);
+  return data;
+}
+
+// ===== 模式1 目标预览（轻量检测，不生成 Mask） =====
+export async function previewMode1(params: {
+  text_prompt: string;
+  image_id: string;
+  image_path: string;
+}): Promise<{ detections: Array<{ box: number[]; label: string; score: number }> }> {
+  const { data } = await api.post('/annotate/preview', params);
   return data;
 }
 

@@ -1,25 +1,26 @@
 /**
- * 左侧工具栏（v3 增强版）
+ * 左侧工具栏（v4）
  *
- * v3 新增：
- *   - 手动标注工具集（矩形框选触发 SAM3、删除/清空 Mask）
- *   - 参考图库信息展示
- *   - 多参考图 bbox 在不同参考图上绘制后提交
+ * v4 修复与增强：
+ *   - 模式1 新增类别下拉框 + 多粒度提示词示例
+ *   - 模式2 标注提交后自动清空 bbox（修复残留 Bug）
+ *   - 全局 CategoryPanel 集成到底部
+ *   - 手动标注工具集
  */
 import React, { useCallback, useRef } from 'react';
-import { Button, Divider, Tooltip, Input, message, Radio, Space, Slider, Tag } from 'antd';
+import { Button, Divider, Tooltip, Input, message, Radio, Space, Slider, Select } from 'antd';
 import {
   SelectOutlined, DragOutlined, ZoomInOutlined, PlayCircleOutlined,
   ClearOutlined, UploadOutlined, FontSizeOutlined, AimOutlined,
   ThunderboltOutlined, AppstoreOutlined, SearchOutlined,
-  PlusOutlined, DeleteOutlined, CheckOutlined,
-  BorderOutlined, UndoOutlined, RedoOutlined, ScissorOutlined,
+  CheckOutlined, BorderOutlined, UndoOutlined, RedoOutlined, ScissorOutlined,
 } from '@ant-design/icons';
-import { useAppStore, ToolType, AnnotationMode, ManualTool } from '../store/useAppStore';
+import { useAppStore, ToolType, AnnotationMode } from '../store/useAppStore';
 import {
   uploadImages, startMode1Annotation, startMode2Annotation,
   startMode3Discovery, startMode3Select,
 } from '../api';
+import CategoryPanel from './CategoryPanel';
 
 const { TextArea } = Input;
 
@@ -30,21 +31,20 @@ const Toolbar: React.FC = () => {
     images, selectedImageId, bbox, taskStatus,
     maskOpacity, setMaskOpacity,
     discoveryTaskId, instanceMasks, selectedInstanceIds,
-    categories, activeCategoryId, mode2CategoryRefs, mode3CategoryRefs,
-    manualTool, brushSize,
-    refImages,
+    categories, activeCategoryId, mode1CategoryId,
+    mode2CategoryRefs, mode3CategoryRefs,
+    manualTool, refImages,
     setDiscoveryTaskId, addImages, selectImage,
-    setTask, resetTask,
-    addCategory, removeCategory, setActiveCategoryId, clearCategories,
-    confirmMode2Bbox, setMode3CategoryInstances,
-    setManualTool, setBrushSize,
-    clearImageMasks, undo, redo,
-    clearRefImages,
+    setTask, resetTask, setMode1CategoryId,
+    setActiveCategoryId, clearCategories,
+    confirmMode2Bbox, clearBboxAfterAnnotate,
+    setMode3CategoryInstances, setManualTool,
+    clearImageMasks, clearRefImages, undo, redo,
   } = useAppStore();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const categoryInputRef = useRef<HTMLInputElement>(null);
   const isAnnotating = taskStatus === 'pending' || taskStatus === 'processing';
+  const displayImageId = useAppStore.getState().viewingImageId || selectedImageId;
 
   const tools: { key: ToolType; icon: React.ReactNode; label: string }[] = [
     { key: 'select', icon: <SelectOutlined />, label: '框选工具' },
@@ -64,7 +64,7 @@ const Toolbar: React.FC = () => {
     } catch (err: any) { message.error({ content: `上传失败：${err.message}`, key: 'upload' }); }
   }, [addImages, selectImage, selectedImageId]);
 
-  const handleUploadClick = useCallback(() => { fileInputRef.current?.click(); }, []);
+  const handleUploadClick = useCallback(() => fileInputRef.current?.click(), []);
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     handleFiles(Array.from(e.target.files || []));
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -75,37 +75,30 @@ const Toolbar: React.FC = () => {
   }, [handleFiles]);
   const handleDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); }, []);
 
-  const handleAddCategory = useCallback(() => {
-    const name = categoryInputRef.current?.value?.trim();
-    if (!name) { message.warning('请输入类别名称'); return; }
-    addCategory(name);
-    if (categoryInputRef.current) categoryInputRef.current.value = '';
-  }, [addCategory]);
-
-  const handleConfirmBbox = useCallback(() => {
-    if (!bbox || bbox.width < 5 || bbox.height < 5) { message.warning('框选区域过小'); return; }
-    if (!activeCategoryId) { message.warning('请先添加类别'); return; }
-    confirmMode2Bbox();
-  }, [bbox, activeCategoryId, confirmMode2Bbox]);
-
-  const handleAssignInstances = useCallback(() => {
-    if (selectedInstanceIds.length === 0) { message.warning('请先选择实例'); return; }
-    if (!activeCategoryId) { message.warning('请先添加类别'); return; }
-    setMode3CategoryInstances(activeCategoryId, [...selectedInstanceIds]);
-    const catName = categories.find(c => c.id === activeCategoryId)?.name || '';
-    message.success(`已分配 ${selectedInstanceIds.length} 个实例到「${catName}」`);
-  }, [selectedInstanceIds, activeCategoryId, categories, setMode3CategoryInstances]);
-
+  // ===== 模式1 =====
   const handleMode1Annotate = useCallback(async () => {
     const text = textPrompt.trim();
     if (!text) { message.warning('请输入文本提示'); return; }
     if (images.length === 0) { message.warning('请先上传图片'); return; }
+
+    const cat = mode1CategoryId ? categories.find(c => c.id === mode1CategoryId) : null;
     const result = await startMode1Annotation({
-      text_prompt: text, image_ids: images.map(i => i.id), image_paths: images.map(i => i.path),
+      text_prompt: text,
+      image_ids: images.map(i => i.id),
+      image_paths: images.map(i => i.path),
+      category_name: cat?.name,
+      category_color: cat?.color,
     });
     setTask(result.task_id, 'pending');
     message.info(`模式1 已提交（${images.length} 张）`);
-  }, [textPrompt, images, setTask]);
+  }, [textPrompt, images, mode1CategoryId, categories, setTask]);
+
+  // ===== 模式2（标注后清空 bbox 修复残留） =====
+  const handleConfirmBbox = useCallback(() => {
+    if (!bbox || bbox.width < 5 || bbox.height < 5) { message.warning('框选区域过小'); return; }
+    if (!activeCategoryId) { message.warning('请先在底部添加类别'); return; }
+    confirmMode2Bbox();
+  }, [bbox, activeCategoryId, confirmMode2Bbox]);
 
   const handleMode2Annotate = useCallback(async () => {
     if (!selectedImageId) { message.warning('请先选择参考图'); return; }
@@ -113,6 +106,7 @@ const Toolbar: React.FC = () => {
     if (!refImage) return;
     const targetImages = images.filter(i => i.id !== selectedImageId).map(i => ({ id: i.id, path: i.path }));
     if (targetImages.length === 0) { message.warning('请上传至少 2 张图片'); return; }
+
     const hasCategories = categories.length > 0 && mode2CategoryRefs.length > 0;
     const hasSingleBbox = bbox && bbox.width > 0;
     if (!hasCategories && !hasSingleBbox) { message.warning('请先框选目标区域'); return; }
@@ -130,14 +124,11 @@ const Toolbar: React.FC = () => {
       reqBbox = [bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height];
     }
 
-    // 多参考图
     if (refImages.length > 0) {
-      reqRefImages = refImages
-        .filter(ri => ri.bbox)
-        .map(ri => {
-          const img = images.find(i => i.id === ri.imageId);
-          return { path: img?.path || '', bbox: [ri.bbox!.x, ri.bbox!.y, ri.bbox!.x + ri.bbox!.width, ri.bbox!.y + ri.bbox!.height] as [number, number, number, number], weight: ri.weight };
-        });
+      reqRefImages = refImages.filter(ri => ri.bbox).map(ri => {
+        const img = images.find(i => i.id === ri.imageId);
+        return { path: img?.path || '', bbox: [ri.bbox!.x, ri.bbox!.y, ri.bbox!.x + ri.bbox!.width, ri.bbox!.y + ri.bbox!.height] as [number, number, number, number], weight: ri.weight };
+      });
     }
 
     const result = await startMode2Annotation({
@@ -146,9 +137,14 @@ const Toolbar: React.FC = () => {
       categories: reqCategories, ref_images: reqRefImages,
     });
     setTask(result.task_id, 'pending');
-    message.info(`模式2 已提交（${targetImages.length} 张待标注）`);
-  }, [selectedImageId, bbox, images, categories, mode2CategoryRefs, refImages, setTask]);
 
+    // 修复模式2框选残留：标注提交后立即清空框选
+    clearBboxAfterAnnotate();
+
+    message.info(`模式2 已提交（${targetImages.length} 张待标注）`);
+  }, [selectedImageId, bbox, images, categories, mode2CategoryRefs, refImages, setTask, clearBboxAfterAnnotate]);
+
+  // ===== 模式3 =====
   const handleMode3Discovery = useCallback(async () => {
     if (!selectedImageId) { message.warning('请先选择参考图'); return; }
     const refImage = images.find(i => i.id === selectedImageId);
@@ -156,8 +152,14 @@ const Toolbar: React.FC = () => {
     const result = await startMode3Discovery({ ref_image_id: refImage.id, ref_image_path: refImage.path });
     setTask(result.task_id, 'pending');
     setDiscoveryTaskId(result.task_id);
-    message.info('正在生成粗分割实例...');
   }, [selectedImageId, images, setTask, setDiscoveryTaskId]);
+
+  const handleAssignInstances = useCallback(() => {
+    if (selectedInstanceIds.length === 0 || !activeCategoryId) return;
+    setMode3CategoryInstances(activeCategoryId, [...selectedInstanceIds]);
+    const catName = categories.find(c => c.id === activeCategoryId)?.name || '';
+    message.success(`已分配到「${catName}」`);
+  }, [selectedInstanceIds, activeCategoryId, categories, setMode3CategoryInstances]);
 
   const handleMode3Select = useCallback(async () => {
     if (!selectedImageId || !discoveryTaskId) return;
@@ -165,9 +167,9 @@ const Toolbar: React.FC = () => {
     if (!refImage) return;
     const targetImages = images.filter(i => i.id !== selectedImageId).map(i => ({ id: i.id, path: i.path }));
     if (targetImages.length === 0) { message.warning('请上传至少 2 张图片'); return; }
+
     const hasCategories = categories.length > 0 && mode3CategoryRefs.length > 0;
-    const hasSingleSelect = selectedInstanceIds.length > 0;
-    if (!hasCategories && !hasSingleSelect) { message.warning('请先选择实例'); return; }
+    if (!hasCategories && selectedInstanceIds.length === 0) { message.warning('请先选择实例'); return; }
 
     let reqCategories = undefined;
     let reqRefImages = undefined;
@@ -192,41 +194,12 @@ const Toolbar: React.FC = () => {
       target_images: targetImages, categories: reqCategories, ref_images: reqRefImages,
     });
     setTask(result.task_id, 'pending');
-    message.info(`模式3 跨图标注已提交`);
   }, [selectedInstanceIds, selectedImageId, discoveryTaskId, images, categories, mode3CategoryRefs, refImages, setTask]);
 
-  const displayImageId = useAppStore.getState().viewingImageId || selectedImageId;
-
-  const renderCategoryManager = () => (
-    <>
-      <Divider style={{ margin: '4px 0', borderColor: '#444' }} />
-      <div style={{ color: '#999', fontSize: 12 }}>多类别管理</div>
-      <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-        <input ref={categoryInputRef} type="text" placeholder="类别名"
-          style={{ flex: 1, background: '#2a2a2a', border: '1px solid #444', color: '#ddd', padding: '2px 6px', borderRadius: 4, fontSize: 12 }}
-          onKeyDown={(e) => e.key === 'Enter' && handleAddCategory()} />
-        <Button size="small" icon={<PlusOutlined />} onClick={handleAddCategory} />
-      </div>
-      {categories.map(cat => {
-        const isActive = cat.id === activeCategoryId;
-        const refCount = currentMode === 'mode2'
-          ? (mode2CategoryRefs.find(r => r.categoryId === cat.id)?.bboxes.length || 0)
-          : (mode3CategoryRefs.find(r => r.categoryId === cat.id)?.instanceIds.length || 0);
-        return (
-          <div key={cat.id} onClick={() => setActiveCategoryId(cat.id)}
-            style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '2px 6px', borderRadius: 4, cursor: 'pointer',
-              background: isActive ? '#333' : 'transparent', border: isActive ? `1px solid ${cat.color}` : '1px solid transparent' }}>
-            <div style={{ width: 10, height: 10, borderRadius: 2, background: cat.color, flexShrink: 0 }} />
-            <span style={{ color: '#ddd', fontSize: 12, flex: 1 }}>{cat.name}</span>
-            {refCount > 0 && <Tag color="blue" style={{ fontSize: 10, padding: '0 3px', lineHeight: '16px' }}>{refCount}</Tag>}
-            <Button type="text" size="small" danger icon={<DeleteOutlined style={{ fontSize: 10 }} />}
-              onClick={(e) => { e.stopPropagation(); removeCategory(cat.id); }}
-              style={{ width: 18, height: 18, padding: 0, minWidth: 18 }} />
-          </div>
-        );
-      })}
-    </>
-  );
+  // 当前类别的确认框选数（当前图片）
+  const currentRefCount = mode2CategoryRefs
+    .filter(r => r.imageId === displayImageId)
+    .reduce((sum, r) => sum + r.bboxes.length, 0);
 
   return (
     <div style={{ width: 230, background: '#1f1f1f', display: 'flex', flexDirection: 'column', padding: '12px', gap: 8, borderRight: '1px solid #333', overflow: 'auto' }}
@@ -245,11 +218,38 @@ const Toolbar: React.FC = () => {
 
       <Divider style={{ margin: '4px 0', borderColor: '#444' }} />
 
+      {/* ===== 模式1 ===== */}
       {currentMode === 'mode1' && (
         <>
-          <div style={{ color: '#999', fontSize: 12 }}>文本提示（逗号分隔多类别）</div>
-          <TextArea value={textPrompt} onChange={(e) => setTextPrompt(e.target.value)} placeholder="person, car, dog"
-            autoSize={{ minRows: 2, maxRows: 4 }} style={{ background: '#2a2a2a', borderColor: '#444', color: '#ddd' }} />
+          <div style={{ color: '#999', fontSize: 12 }}>绑定类别（可选）</div>
+          <Select
+            value={mode1CategoryId || undefined}
+            onChange={(v) => setMode1CategoryId(v || null)}
+            allowClear
+            placeholder="选择类别"
+            size="small"
+            style={{ width: '100%' }}
+            options={categories.map(c => ({
+              value: c.id,
+              label: (
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 2, background: c.color, display: 'inline-block' }} />
+                  {c.name}
+                </span>
+              ),
+            }))}
+          />
+          <div style={{ color: '#999', fontSize: 12, marginTop: 4 }}>文本提示词</div>
+          <TextArea
+            value={textPrompt}
+            onChange={(e) => setTextPrompt(e.target.value)}
+            placeholder={'示例：\n  cat, dog\n  标注所有红色小轿车\n  识别画面左侧的白色杯子'}
+            autoSize={{ minRows: 3, maxRows: 5 }}
+            style={{ background: '#2a2a2a', borderColor: '#444', color: '#ddd' }}
+          />
+          <div style={{ color: '#666', fontSize: 10 }}>
+            支持逗号分隔多类别，或完整描述句子
+          </div>
           <Button type="primary" icon={<ThunderboltOutlined />} onClick={handleMode1Annotate}
             disabled={isAnnotating} loading={isAnnotating} block>
             {isAnnotating ? '标注中...' : '一键标注'}
@@ -257,6 +257,7 @@ const Toolbar: React.FC = () => {
         </>
       )}
 
+      {/* ===== 模式2 ===== */}
       {currentMode === 'mode2' && (
         <>
           <div style={{ color: '#999', fontSize: 12, marginBottom: 4 }}>画布工具</div>
@@ -278,17 +279,20 @@ const Toolbar: React.FC = () => {
               确认到「{categories.find(c => c.id === activeCategoryId)?.name || ''}」
             </Button>
           )}
+          {currentRefCount > 0 && (
+            <div style={{ color: '#52c41a', fontSize: 11 }}>当前图已确认 {currentRefCount} 个框选</div>
+          )}
           <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleMode2Annotate}
             disabled={isAnnotating} loading={isAnnotating} block style={{ marginTop: 4 }}>
             {isAnnotating ? '标注中...' : '批量标注'}
           </Button>
           {refImages.length > 0 && (
-            <div style={{ color: '#52c41a', fontSize: 11 }}>已选 {refImages.length} 张参考图（右侧图钉管理）</div>
+            <div style={{ color: '#52c41a', fontSize: 11 }}>已选 {refImages.length} 张参考图</div>
           )}
-          {renderCategoryManager()}
         </>
       )}
 
+      {/* ===== 模式3 ===== */}
       {currentMode === 'mode3' && (
         <>
           <Button icon={<SearchOutlined />} onClick={handleMode3Discovery}
@@ -306,9 +310,7 @@ const Toolbar: React.FC = () => {
                         ids.includes(inst.id) ? ids.filter(i => i !== inst.id) : [...ids, inst.id]
                       );
                     }}
-                    style={{ borderColor: `rgb(${inst.color.join(',')})`, minWidth: 40 }}>
-                    #{inst.id}
-                  </Button>
+                    style={{ borderColor: `rgb(${inst.color.join(',')})`, minWidth: 40 }}>#{inst.id}</Button>
                 ))}
               </div>
               {categories.length > 0 && selectedInstanceIds.length > 0 && (
@@ -323,44 +325,43 @@ const Toolbar: React.FC = () => {
               </Button>
             </>
           )}
-          {renderCategoryManager()}
         </>
       )}
 
-      {/* ===== 手动标注工具集 ===== */}
+      {/* ===== 手动标注工具 ===== */}
       <Divider style={{ margin: '4px 0', borderColor: '#444' }} />
       <div style={{ color: '#999', fontSize: 12 }}>手动标注（兜底修正）</div>
       <Space wrap>
-        <Tooltip title="矩形框选 → SAM3 生成 Mask">
+        <Tooltip title="矩形→SAM3 Mask">
           <Button size="small" icon={<BorderOutlined />}
             type={manualTool === 'rect_manual' ? 'primary' : 'default'}
             onClick={() => setManualTool(manualTool === 'rect_manual' ? null : 'rect_manual')}
             style={manualTool === 'rect_manual' ? { background: '#fa8c16', borderColor: '#fa8c16' } : {}} />
         </Tooltip>
-        <Tooltip title="撤销 (Ctrl+Z)">
-          <Button size="small" icon={<UndoOutlined />} onClick={undo} />
-        </Tooltip>
-        <Tooltip title="重做 (Ctrl+Shift+Z)">
-          <Button size="small" icon={<RedoOutlined />} onClick={redo} />
-        </Tooltip>
-        <Tooltip title="清空当前图 Mask">
+        <Tooltip title="撤销 Ctrl+Z"><Button size="small" icon={<UndoOutlined />} onClick={undo} /></Tooltip>
+        <Tooltip title="重做 Ctrl+Shift+Z"><Button size="small" icon={<RedoOutlined />} onClick={redo} /></Tooltip>
+        <Tooltip title="清空当前图标注">
           <Button size="small" danger icon={<ScissorOutlined />}
-            onClick={() => { if (displayImageId) { clearImageMasks(displayImageId); message.info('已清空当前图标注'); } }} />
+            onClick={() => { if (displayImageId) clearImageMasks(displayImageId); }} />
         </Tooltip>
       </Space>
       {manualTool === 'rect_manual' && (
-        <div style={{ color: '#fa8c16', fontSize: 11, marginTop: 2 }}>
-          在画布上框选区域 → 自动触发 SAM3 生成 Mask
-        </div>
+        <div style={{ color: '#fa8c16', fontSize: 11, marginTop: 2 }}>画布框选→自动 SAM3 生成 Mask</div>
       )}
 
+      {/* 底部区域 */}
       <div style={{ flex: 1 }} />
+
       <Divider style={{ margin: '4px 0', borderColor: '#444' }} />
       <div style={{ color: '#999', fontSize: 12 }}>Mask 透明度</div>
       <Slider min={0} max={1} step={0.05} value={maskOpacity} onChange={(v) => setMaskOpacity(v)}
         tooltip={{ formatter: (v) => `${Math.round((v || 0) * 100)}%` }} />
+
+      {/* 全局类别面板 */}
+      <CategoryPanel />
+
       <Button icon={<ClearOutlined />} onClick={() => { resetTask(); clearCategories(); clearRefImages(); }}
-        block size="small" danger>重置任务</Button>
+        block size="small" danger style={{ marginTop: 4 }}>重置全部</Button>
     </div>
   );
 };

@@ -120,7 +120,8 @@ def warmup_models(**kwargs):
 
 # ==================== 模式1 文本提示标注 ====================
 @celery_app.task(name="process_text_annotation", bind=True, max_retries=2, retry_backoff=5)
-def process_text_annotation(self, image_paths, image_ids, text_prompt, task_id):
+def process_text_annotation(self, image_paths, image_ids, text_prompt, task_id,
+                            category_name=None, category_color=None):
     from backend.models.sam_engine import SAMEngine
     from backend.models.grounding_dino_engine import GroundingDINOEngine
     from backend.services.mask_utils import mask_to_transparent_png, mask_to_bbox, mask_to_polygon
@@ -178,7 +179,12 @@ def process_text_annotation(self, image_paths, image_ids, text_prompt, task_id):
                 precise_mask = sam.generate_mask(target_image, det["box"])
                 if precise_mask.sum() < 10:
                     continue
-                color = MODE1_CATEGORY_COLORS[det["label_id"] % len(MODE1_CATEGORY_COLORS)]
+                if category_color:
+                    # 全局类别颜色（hex → RGB）
+                    hex_c = category_color.lstrip('#')
+                    color = tuple(int(hex_c[i:i+2], 16) for i in (0, 2, 4))
+                else:
+                    color = MODE1_CATEGORY_COLORS[det["label_id"] % len(MODE1_CATEGORY_COLORS)]
                 mask_path = get_mask_path(img_id, inst_idx)
                 mask_to_transparent_png(precise_mask, mask_path, color=color, alpha=MASK_MODE1_ALPHA)
                 image_mask_urls.append(get_mask_url(img_id, inst_idx))

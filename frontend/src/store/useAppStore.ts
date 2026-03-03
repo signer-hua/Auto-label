@@ -1,11 +1,11 @@
 /**
- * Zustand 全局状态管理（v3 增强版）
+ * Zustand 全局状态管理（v4）
  *
- * v3 新增：
- *   - 多参考图库：refImageIds + refImageWeights + refImageBboxes
- *   - 置信度评分：imageScores + 筛选/排序
- *   - 手动标注工具：manualTool + brushSize + 撤销/重做历史
- *   - 图层隔离强化
+ * v4 修复与增强：
+ *   - 全局类别管理：categories 持久化到 localStorage，模式1/2/3 统一使用
+ *   - 模式1 类别绑定：mode1CategoryId 绑定标注结果至指定全局类别
+ *   - 模式2 框选残留修复：Mode2CategoryRef 增加 imageId 字段，confirmedBboxes 按图片过滤
+ *   - clearBboxAfterAnnotate：标注提交后自动清空框选状态
  */
 import { create } from 'zustand';
 
@@ -30,14 +30,17 @@ export interface InstanceItem {
   color: number[];
 }
 
+/** 全局类别（跨模式共享，持久化到 localStorage） */
 export interface CategoryItem {
   id: string;
   name: string;
   color: string;
 }
 
+/** 模式2 类别-框选绑定（含 imageId 防跨图残留） */
 export interface Mode2CategoryRef {
   categoryId: string;
+  imageId: string;
   bboxes: BBox[];
 }
 
@@ -46,7 +49,6 @@ export interface Mode3CategoryRef {
   instanceIds: number[];
 }
 
-/** 单图置信度评分 */
 export interface ImageScore {
   total: number;
   similarity: number;
@@ -56,14 +58,12 @@ export interface ImageScore {
   level: 'high' | 'medium' | 'low';
 }
 
-/** 参考图信息 */
 export interface RefImageInfo {
   imageId: string;
   weight: number;
   bbox: BBox | null;
 }
 
-/** 手动标注操作记录（撤销/重做） */
 export interface HistoryEntry {
   type: 'add_mask' | 'delete_mask';
   imageId: string;
@@ -79,62 +79,63 @@ export type TaskStatus =
 export type ScoreFilter = 'all' | 'high' | 'medium' | 'low';
 export type SortOrder = 'default' | 'score_asc' | 'score_desc';
 
-const CATEGORY_COLORS = [
+/** 预设类别颜色 */
+const PRESET_COLORS = [
   '#FF5050', '#50C850', '#5078FF', '#FFC800',
   '#C850FF', '#00DCB4', '#FF7800', '#B4B400',
   '#6496FF', '#FF6464',
 ];
 
+/** 从 localStorage 加载持久化类别 */
+function loadCategories(): CategoryItem[] {
+  try {
+    const raw = localStorage.getItem('autolabel_categories');
+    if (raw) return JSON.parse(raw);
+  } catch { /* ignore */ }
+  return [];
+}
+
+/** 保存类别到 localStorage */
+function saveCategories(cats: CategoryItem[]) {
+  try { localStorage.setItem('autolabel_categories', JSON.stringify(cats)); } catch { /* ignore */ }
+}
+
 interface AppState {
   currentMode: AnnotationMode;
   textPrompt: string;
-
   images: ImageItem[];
   selectedImageId: string | null;
   viewingImageId: string | null;
-
   activeTool: ToolType;
   bbox: BBox | null;
   bboxImageId: string | null;
   isDrawing: boolean;
-
   taskId: string | null;
   taskStatus: TaskStatus;
   taskProgress: number;
   taskTotal: number;
   taskMessage: string;
   errorType: string | null;
-
   maskUrls: Record<string, string[]>;
   exportUrl: string | null;
   maskOpacity: number;
-
   discoveryTaskId: string | null;
   instanceMasks: InstanceItem[];
   instanceMasksImageId: string | null;
   selectedInstanceIds: number[];
-
   categories: CategoryItem[];
   activeCategoryId: string | null;
+  mode1CategoryId: string | null;  // 模式1 绑定的全局类别
   mode2CategoryRefs: Mode2CategoryRef[];
   mode3CategoryRefs: Mode3CategoryRef[];
-
   stageScale: number;
   stagePosition: { x: number; y: number };
-
-  // v3: 多参考图库
   refImages: RefImageInfo[];
-
-  // v3: 置信度评分
   imageScores: Record<string, ImageScore>;
   scoreFilter: ScoreFilter;
   sortOrder: SortOrder;
-
-  // v3: 手动标注工具
   manualTool: ManualTool;
   brushSize: number;
-
-  // v3: 撤销/重做
   undoStack: HistoryEntry[];
   redoStack: HistoryEntry[];
 
@@ -165,21 +166,28 @@ interface AppState {
   setStageScale: (scale: number) => void;
   setStagePosition: (pos: { x: number; y: number }) => void;
   resetTask: () => void;
-  addCategory: (name: string) => void;
+  // 全局类别管理（持久化）
+  addCategory: (name: string, color?: string) => void;
+  updateCategory: (id: string, name: string, color: string) => void;
   removeCategory: (id: string) => void;
   setActiveCategoryId: (id: string | null) => void;
   clearCategories: () => void;
+  setMode1CategoryId: (id: string | null) => void;
+  // 模式2 框选管理（含 imageId 绑定）
   confirmMode2Bbox: () => void;
+  clearBboxAfterAnnotate: () => void;
   setMode3CategoryInstances: (categoryId: string, instanceIds: number[]) => void;
-  // v3 actions
+  // 多参考图
   addRefImage: (imageId: string) => void;
   removeRefImage: (imageId: string) => void;
   setRefImageWeight: (imageId: string, weight: number) => void;
   setRefImageBbox: (imageId: string, bbox: BBox | null) => void;
   clearRefImages: () => void;
+  // 评分
   setImageScores: (scores: Record<string, ImageScore>) => void;
   setScoreFilter: (filter: ScoreFilter) => void;
   setSortOrder: (order: SortOrder) => void;
+  // 手动标注
   setManualTool: (tool: ManualTool) => void;
   setBrushSize: (size: number) => void;
   addMaskToImage: (imageId: string, maskUrl: string) => void;
@@ -189,7 +197,9 @@ interface AppState {
   redo: () => void;
 }
 
-let _nextCategoryId = 1;
+let _nextCatId = Date.now();
+
+const initialCategories = loadCategories();
 
 export const useAppStore = create<AppState>((set, get) => ({
   currentMode: 'mode1',
@@ -214,8 +224,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   instanceMasks: [],
   instanceMasksImageId: null,
   selectedInstanceIds: [],
-  categories: [],
-  activeCategoryId: null,
+  categories: initialCategories,
+  activeCategoryId: initialCategories[0]?.id || null,
+  mode1CategoryId: null,
   mode2CategoryRefs: [],
   mode3CategoryRefs: [],
   stageScale: 1,
@@ -229,6 +240,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   undoStack: [],
   redoStack: [],
 
+  // ===== 模式切换：清空所有模式特有状态 =====
   setCurrentMode: (mode) =>
     set({
       currentMode: mode, bbox: null, bboxImageId: null,
@@ -249,11 +261,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (s.viewingImageId === id) updates.viewingImageId = null;
       if (s.bboxImageId === id) { updates.bbox = null; updates.bboxImageId = null; }
       if (s.instanceMasksImageId === id) {
-        updates.instanceMasks = [];
-        updates.instanceMasksImageId = null;
-        updates.selectedInstanceIds = [];
+        updates.instanceMasks = []; updates.instanceMasksImageId = null; updates.selectedInstanceIds = [];
       }
       updates.refImages = s.refImages.filter((r) => r.imageId !== id);
+      updates.mode2CategoryRefs = s.mode2CategoryRefs.filter((r) => r.imageId !== id);
       return updates;
     }),
 
@@ -262,23 +273,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   setActiveTool: (tool) => set({ activeTool: tool, manualTool: null }),
 
   setBBox: (bbox) => {
-    const state = get();
-    const displayId = state.viewingImageId || state.selectedImageId;
-    set({ bbox, bboxImageId: displayId });
+    const s = get();
+    set({ bbox, bboxImageId: s.viewingImageId || s.selectedImageId });
   },
-
   setBBoxImageId: (id) => set({ bboxImageId: id }),
   setIsDrawing: (drawing) => set({ isDrawing: drawing }),
 
   setTask: (taskId, status) =>
     set({ taskId, taskStatus: status, taskProgress: 0, taskTotal: 0, taskMessage: '', errorType: null }),
-
-  updateTaskProgress: (progress, total, message) =>
-    set({ taskProgress: progress, taskTotal: total, taskMessage: message }),
-
-  setTaskStatus: (status, message) =>
-    set((s) => ({ taskStatus: status, taskMessage: message ?? s.taskMessage })),
-
+  updateTaskProgress: (progress, total, message) => set({ taskProgress: progress, taskTotal: total, taskMessage: message }),
+  setTaskStatus: (status, message) => set((s) => ({ taskStatus: status, taskMessage: message ?? s.taskMessage })),
   setErrorType: (errorType) => set({ errorType }),
   setMaskUrls: (urls) => set({ maskUrls: urls }),
   setExportUrl: (url) => set({ exportUrl: url }),
@@ -286,18 +290,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   setDiscoveryTaskId: (id) => set({ discoveryTaskId: id }),
 
   setInstanceMasks: (instances, imageId) => {
-    const state = get();
-    const imgId = imageId || state.viewingImageId || state.selectedImageId;
-    set({ instanceMasks: instances, instanceMasksImageId: imgId, selectedInstanceIds: [] });
+    const s = get();
+    set({ instanceMasks: instances, instanceMasksImageId: imageId || s.viewingImageId || s.selectedImageId, selectedInstanceIds: [] });
   },
-
   toggleInstanceId: (id) =>
     set((s) => ({
       selectedInstanceIds: s.selectedInstanceIds.includes(id)
         ? s.selectedInstanceIds.filter((i) => i !== id)
         : [...s.selectedInstanceIds, id],
     })),
-
   setSelectedInstanceIds: (ids) => set({ selectedInstanceIds: ids }),
   setStageScale: (scale) => set({ stageScale: scale }),
   setStagePosition: (pos) => set({ stagePosition: pos }),
@@ -309,43 +310,74 @@ export const useAppStore = create<AppState>((set, get) => ({
       discoveryTaskId: null, instanceMasks: [], instanceMasksImageId: null,
       selectedInstanceIds: [], bbox: null, bboxImageId: null,
       imageScores: {}, undoStack: [], redoStack: [],
+      mode2CategoryRefs: [], mode3CategoryRefs: [],
     }),
 
-  addCategory: (name) =>
+  // ===== 全局类别管理（持久化） =====
+  addCategory: (name, color) =>
     set((s) => {
-      const id = `cat_${_nextCategoryId++}`;
-      const newCat: CategoryItem = { id, name, color: CATEGORY_COLORS[s.categories.length % CATEGORY_COLORS.length] };
-      return { categories: [...s.categories, newCat], activeCategoryId: s.activeCategoryId || id };
+      const id = `cat_${_nextCatId++}`;
+      const c = color || PRESET_COLORS[s.categories.length % PRESET_COLORS.length];
+      const newCat: CategoryItem = { id, name, color: c };
+      const cats = [...s.categories, newCat];
+      saveCategories(cats);
+      return { categories: cats, activeCategoryId: s.activeCategoryId || id };
+    }),
+
+  updateCategory: (id, name, color) =>
+    set((s) => {
+      const cats = s.categories.map((c) => c.id === id ? { ...c, name, color } : c);
+      saveCategories(cats);
+      return { categories: cats };
     }),
 
   removeCategory: (id) =>
     set((s) => {
-      const categories = s.categories.filter((c) => c.id !== id);
+      const cats = s.categories.filter((c) => c.id !== id);
+      saveCategories(cats);
       return {
-        categories,
-        activeCategoryId: s.activeCategoryId === id ? (categories[0]?.id || null) : s.activeCategoryId,
+        categories: cats,
+        activeCategoryId: s.activeCategoryId === id ? (cats[0]?.id || null) : s.activeCategoryId,
+        mode1CategoryId: s.mode1CategoryId === id ? null : s.mode1CategoryId,
         mode2CategoryRefs: s.mode2CategoryRefs.filter((r) => r.categoryId !== id),
         mode3CategoryRefs: s.mode3CategoryRefs.filter((r) => r.categoryId !== id),
       };
     }),
 
   setActiveCategoryId: (id) => set({ activeCategoryId: id }),
-  clearCategories: () => set({ categories: [], activeCategoryId: null, mode2CategoryRefs: [], mode3CategoryRefs: [] }),
 
+  clearCategories: () => {
+    saveCategories([]);
+    set({ categories: [], activeCategoryId: null, mode1CategoryId: null, mode2CategoryRefs: [], mode3CategoryRefs: [] });
+  },
+
+  setMode1CategoryId: (id) => set({ mode1CategoryId: id }),
+
+  // ===== 模式2 框选管理（含 imageId 绑定，防跨图残留） =====
   confirmMode2Bbox: () =>
     set((s) => {
       if (!s.bbox || !s.activeCategoryId) return {};
-      const existing = s.mode2CategoryRefs.find((r) => r.categoryId === s.activeCategoryId);
+      const displayId = s.viewingImageId || s.selectedImageId || '';
       const bboxCopy: BBox = { ...s.bbox };
+      const existing = s.mode2CategoryRefs.find(
+        (r) => r.categoryId === s.activeCategoryId && r.imageId === displayId
+      );
       let refs: Mode2CategoryRef[];
       if (existing) {
         refs = s.mode2CategoryRefs.map((r) =>
-          r.categoryId === s.activeCategoryId ? { ...r, bboxes: [...r.bboxes, bboxCopy] } : r);
+          r.categoryId === s.activeCategoryId && r.imageId === displayId
+            ? { ...r, bboxes: [...r.bboxes, bboxCopy] }
+            : r
+        );
       } else {
-        refs = [...s.mode2CategoryRefs, { categoryId: s.activeCategoryId!, bboxes: [bboxCopy] }];
+        refs = [...s.mode2CategoryRefs, { categoryId: s.activeCategoryId!, imageId: displayId, bboxes: [bboxCopy] }];
       }
       return { mode2CategoryRefs: refs, bbox: null };
     }),
+
+  /** 标注提交后立即清空框选状态（解决框选残留） */
+  clearBboxAfterAnnotate: () =>
+    set({ bbox: null, bboxImageId: null, isDrawing: false }),
 
   setMode3CategoryInstances: (categoryId, instanceIds) =>
     set((s) => {
@@ -359,95 +391,58 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { mode3CategoryRefs: refs };
     }),
 
-  // ===== v3: 多参考图库 =====
+  // ===== 多参考图 =====
   addRefImage: (imageId) =>
     set((s) => {
       if (s.refImages.length >= 5 || s.refImages.some(r => r.imageId === imageId)) return {};
       return { refImages: [...s.refImages, { imageId, weight: 1.0, bbox: null }] };
     }),
-
-  removeRefImage: (imageId) =>
-    set((s) => ({ refImages: s.refImages.filter((r) => r.imageId !== imageId) })),
-
+  removeRefImage: (imageId) => set((s) => ({ refImages: s.refImages.filter((r) => r.imageId !== imageId) })),
   setRefImageWeight: (imageId, weight) =>
-    set((s) => ({
-      refImages: s.refImages.map((r) => r.imageId === imageId ? { ...r, weight } : r),
-    })),
-
+    set((s) => ({ refImages: s.refImages.map((r) => r.imageId === imageId ? { ...r, weight } : r) })),
   setRefImageBbox: (imageId, bbox) =>
-    set((s) => ({
-      refImages: s.refImages.map((r) => r.imageId === imageId ? { ...r, bbox } : r),
-    })),
-
+    set((s) => ({ refImages: s.refImages.map((r) => r.imageId === imageId ? { ...r, bbox } : r) })),
   clearRefImages: () => set({ refImages: [] }),
 
-  // ===== v3: 置信度评分 =====
+  // ===== 评分 =====
   setImageScores: (scores) => set({ imageScores: scores }),
   setScoreFilter: (filter) => set({ scoreFilter: filter }),
   setSortOrder: (order) => set({ sortOrder: order }),
 
-  // ===== v3: 手动标注工具 =====
+  // ===== 手动标注 =====
   setManualTool: (tool) => set({ manualTool: tool, activeTool: 'select' }),
   setBrushSize: (size) => set({ brushSize: size }),
-
   addMaskToImage: (imageId, maskUrl) =>
-    set((s) => {
-      const existing = s.maskUrls[imageId] || [];
-      return {
-        maskUrls: { ...s.maskUrls, [imageId]: [...existing, maskUrl] },
-        undoStack: [...s.undoStack.slice(-9), { type: 'add_mask', imageId, maskUrl }],
-        redoStack: [],
-      };
-    }),
-
-  removeMaskFromImage: (imageId, maskUrl) =>
-    set((s) => {
-      const existing = s.maskUrls[imageId] || [];
-      return {
-        maskUrls: { ...s.maskUrls, [imageId]: existing.filter((u) => u !== maskUrl) },
-        undoStack: [...s.undoStack.slice(-9), { type: 'delete_mask', imageId, maskUrl }],
-        redoStack: [],
-      };
-    }),
-
-  clearImageMasks: (imageId) =>
     set((s) => ({
-      maskUrls: { ...s.maskUrls, [imageId]: [] },
+      maskUrls: { ...s.maskUrls, [imageId]: [...(s.maskUrls[imageId] || []), maskUrl] },
+      undoStack: [...s.undoStack.slice(-9), { type: 'add_mask', imageId, maskUrl }],
+      redoStack: [],
     })),
-
+  removeMaskFromImage: (imageId, maskUrl) =>
+    set((s) => ({
+      maskUrls: { ...s.maskUrls, [imageId]: (s.maskUrls[imageId] || []).filter((u) => u !== maskUrl) },
+      undoStack: [...s.undoStack.slice(-9), { type: 'delete_mask', imageId, maskUrl }],
+      redoStack: [],
+    })),
+  clearImageMasks: (imageId) => set((s) => ({ maskUrls: { ...s.maskUrls, [imageId]: [] } })),
   undo: () =>
     set((s) => {
       if (s.undoStack.length === 0) return {};
       const entry = s.undoStack[s.undoStack.length - 1];
       const existing = s.maskUrls[entry.imageId] || [];
-      let newMasks: string[];
-      if (entry.type === 'add_mask') {
-        newMasks = existing.filter((u) => u !== entry.maskUrl);
-      } else {
-        newMasks = [...existing, entry.maskUrl];
-      }
-      return {
-        maskUrls: { ...s.maskUrls, [entry.imageId]: newMasks },
-        undoStack: s.undoStack.slice(0, -1),
-        redoStack: [...s.redoStack, entry],
-      };
+      const newMasks = entry.type === 'add_mask'
+        ? existing.filter((u) => u !== entry.maskUrl)
+        : [...existing, entry.maskUrl];
+      return { maskUrls: { ...s.maskUrls, [entry.imageId]: newMasks }, undoStack: s.undoStack.slice(0, -1), redoStack: [...s.redoStack, entry] };
     }),
-
   redo: () =>
     set((s) => {
       if (s.redoStack.length === 0) return {};
       const entry = s.redoStack[s.redoStack.length - 1];
       const existing = s.maskUrls[entry.imageId] || [];
-      let newMasks: string[];
-      if (entry.type === 'add_mask') {
-        newMasks = [...existing, entry.maskUrl];
-      } else {
-        newMasks = existing.filter((u) => u !== entry.maskUrl);
-      }
-      return {
-        maskUrls: { ...s.maskUrls, [entry.imageId]: newMasks },
-        redoStack: s.redoStack.slice(0, -1),
-        undoStack: [...s.undoStack, entry],
-      };
+      const newMasks = entry.type === 'add_mask'
+        ? [...existing, entry.maskUrl]
+        : existing.filter((u) => u !== entry.maskUrl);
+      return { maskUrls: { ...s.maskUrls, [entry.imageId]: newMasks }, redoStack: s.redoStack.slice(0, -1), undoStack: [...s.undoStack, entry] };
     }),
 }));

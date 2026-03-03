@@ -47,11 +47,14 @@ const MainCanvas: React.FC = () => {
   const showBbox = currentMode === 'mode2' && bbox && bboxImageId === displayImageId;
   const showInstances = currentMode === 'mode3' && instanceMasks.length > 0 && instanceMasksImageId === displayImageId;
 
+  // 仅显示属于当前图片的已确认框选（修复跨图残留 Bug）
   const confirmedBboxes = currentMode === 'mode2'
-    ? mode2CategoryRefs.flatMap((ref) => {
-        const cat = categories.find((c) => c.id === ref.categoryId);
-        return ref.bboxes.map((b) => ({ bbox: b, color: cat?.color || '#1890ff' }));
-      })
+    ? mode2CategoryRefs
+        .filter((ref) => ref.imageId === displayImageId)
+        .flatMap((ref) => {
+          const cat = categories.find((c) => c.id === ref.categoryId);
+          return ref.bboxes.map((b) => ({ bbox: b, color: cat?.color || '#1890ff' }));
+        })
     : [];
 
   const drawStart = useRef<{ x: number; y: number } | null>(null);
