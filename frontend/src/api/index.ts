@@ -47,11 +47,13 @@ export interface CategoryBboxRef {
   name: string;
   bboxes: [number, number, number, number][];
   ref_images?: RefImageParam[];
+  color?: string;
 }
 
 export interface CategoryInstanceRef {
   name: string;
   instance_ids: number[];
+  color?: string;
 }
 
 // ===== 上传 =====
@@ -100,6 +102,7 @@ export async function startMode2Annotation(params: {
   target_images: Array<{ id: string; path: string }>;
   categories?: CategoryBboxRef[];
   ref_images?: RefImageParam[];
+  category_color?: string;
 }): Promise<{ task_id: string; status: string; mode: string }> {
   const { data } = await api.post('/annotate/mode2', params);
   return data;
@@ -121,6 +124,7 @@ export async function startMode3Select(params: {
   target_images: Array<{ id: string; path: string }>;
   categories?: CategoryInstanceRef[];
   ref_images?: RefImageParam[];
+  category_color?: string;
 }): Promise<{ task_id: string; status: string; mode: string }> {
   const { data } = await api.post('/annotate/mode3/select', params);
   return data;

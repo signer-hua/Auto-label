@@ -74,6 +74,7 @@ class CategoryBboxRef(BaseModel):
     name: str = Field(..., description="类别名称")
     bboxes: list[list[float]] = Field(..., description="框选坐标列表 [[x1,y1,x2,y2], ...]")
     ref_images: list[RefImageItem] | None = Field(None, description="多参考图列表")
+    color: str | None = Field(None, description="类别颜色 hex（如 #FF5733）")
 
 
 class Mode2Request(BaseModel):
@@ -84,6 +85,7 @@ class Mode2Request(BaseModel):
     target_images: list[dict] = Field(..., description="待标注图像列表 [{id, path}]")
     categories: list[CategoryBboxRef] | None = Field(None, description="多类别参考（可选）")
     ref_images: list[RefImageItem] | None = Field(None, description="多参考图列表（单类别模式）")
+    category_color: str | None = Field(None, description="单类别颜色 hex（用于统一渲染颜色）")
 
 
 class Mode3DiscoveryRequest(BaseModel):
@@ -96,6 +98,7 @@ class CategoryInstanceRef(BaseModel):
     """多类别实例参考"""
     name: str = Field(..., description="类别名称")
     instance_ids: list[int] = Field(..., description="选中的实例 ID 列表")
+    color: str | None = Field(None, description="类别颜色 hex（如 #FF5733）")
 
 
 class Mode3SelectRequest(BaseModel):
@@ -107,6 +110,7 @@ class Mode3SelectRequest(BaseModel):
     target_images: list[dict] = Field(..., description="待标注图像列表 [{id, path}]")
     categories: list[CategoryInstanceRef] | None = Field(None, description="多类别参考（可选）")
     ref_images: list[RefImageItem] | None = Field(None, description="多参考图列表（单类别模式）")
+    category_color: str | None = Field(None, description="单类别颜色 hex（用于统一渲染颜色）")
 
 
 class ManualSamRequest(BaseModel):
@@ -277,7 +281,7 @@ async def annotate_mode2(req: Mode2Request):
 
     cats_json = None
     if req.categories:
-        cats_json = [{"name": c.name, "bboxes": c.bboxes,
+        cats_json = [{"name": c.name, "bboxes": c.bboxes, "color": c.color,
                       "ref_images": [ri.model_dump() for ri in c.ref_images] if c.ref_images else []}
                      for c in req.categories]
 
@@ -290,6 +294,7 @@ async def annotate_mode2(req: Mode2Request):
         ref_image_path=req.ref_image_path, bbox=req.bbox,
         target_image_paths=target_paths, target_image_ids=target_ids,
         task_id=task_id, categories=cats_json, ref_images=refs_json,
+        category_color=req.category_color,
     )
     logger.info("Mode2 task: %s (ref=%s, targets=%d, refs=%d)",
                 task_id, req.ref_image_id, len(req.target_images),
@@ -345,7 +350,7 @@ async def annotate_mode3_select(req: Mode3SelectRequest):
 
     cats_json = None
     if req.categories:
-        cats_json = [{"name": c.name, "instance_ids": c.instance_ids} for c in req.categories]
+        cats_json = [{"name": c.name, "instance_ids": c.instance_ids, "color": c.color} for c in req.categories]
 
     refs_json = None
     if req.ref_images:
@@ -360,6 +365,7 @@ async def annotate_mode3_select(req: Mode3SelectRequest):
         target_image_ids=target_ids,
         task_id=task_id,
         categories=cats_json, ref_images=refs_json,
+        category_color=req.category_color,
     )
     logger.info("Mode3 select task: %s (instance=%d, targets=%d)",
                 task_id, req.selected_instance_id, len(req.target_images))

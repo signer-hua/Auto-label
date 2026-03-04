@@ -46,6 +46,9 @@ weights/
 # 环境配置（包含本地路径）
 .env
 
+# Redis
+dump.rdb
+
 # 日志
 *.log
 

@@ -259,7 +259,7 @@ def process_text_annotation(self, image_paths, image_ids, text_prompt, task_id,
 @celery_app.task(name="process_batch_annotation", bind=True, max_retries=2, retry_backoff=5)
 def process_batch_annotation(
     self, ref_image_path, bbox, target_image_paths, target_image_ids, task_id,
-    categories=None, ref_images=None,
+    categories=None, ref_images=None, category_color=None,
 ):
     """
     模式2 框选批量标注。
@@ -330,7 +330,12 @@ def process_batch_annotation(
                     template = dino.extract_multi_bbox_feature(ref_pp, cat_bboxes, sam_engine=sam)
                     ref_area_ratio = 0.05
 
-                color = MULTI_CATEGORY_COLORS[cat_idx % len(MULTI_CATEGORY_COLORS)]
+                cat_color_hex = cat_info.get("color")
+                if cat_color_hex and isinstance(cat_color_hex, str) and cat_color_hex.startswith('#'):
+                    hc = cat_color_hex.lstrip('#')
+                    color = (int(hc[0:2], 16), int(hc[2:4], 16), int(hc[4:6], 16))
+                else:
+                    color = MULTI_CATEGORY_COLORS[cat_idx % len(MULTI_CATEGORY_COLORS)]
                 category_templates.append({
                     "name": cat_name, "template": template, "color": color,
                     "category_id": cat_idx + 1, "area_ratio": ref_area_ratio,
@@ -395,8 +400,13 @@ def process_batch_annotation(
                 template = dino.extract_mask_feature(ref_pp, ref_mask)
                 ref_area_ratio = float(ref_mask.sum()) / (ref_pp.size[0] * ref_pp.size[1])
 
+            if category_color and isinstance(category_color, str) and category_color.startswith('#'):
+                hc = category_color.lstrip('#')
+                single_color = (int(hc[0:2], 16), int(hc[2:4], 16), int(hc[4:6], 16))
+            else:
+                single_color = (255, 80, 80)
             category_templates.append({
-                "name": "target", "template": template, "color": (255, 80, 80),
+                "name": "target", "template": template, "color": single_color,
                 "category_id": 1, "area_ratio": ref_area_ratio,
             })
 
@@ -568,7 +578,7 @@ def process_instance_discovery(self, ref_image_path, ref_image_id, task_id):
 def process_instance_annotation(
     self, ref_image_path, ref_image_id, selected_instance_id,
     target_image_paths, target_image_ids, task_id,
-    categories=None, ref_images=None,
+    categories=None, ref_images=None, category_color=None,
 ):
     from backend.models.sam_engine import SAMEngine
     from backend.models.dino_engine import DINOEngine
@@ -624,7 +634,12 @@ def process_instance_annotation(
 
                 total_area = sum(m.sum() for m in selected_masks)
                 ref_area_ratio = float(total_area / len(selected_masks)) / (ref_image.size[0] * ref_image.size[1])
-                color = MULTI_CATEGORY_COLORS[cat_idx % len(MULTI_CATEGORY_COLORS)]
+                cat_color_hex = cat_info.get("color")
+                if cat_color_hex and isinstance(cat_color_hex, str) and cat_color_hex.startswith('#'):
+                    hc = cat_color_hex.lstrip('#')
+                    color = (int(hc[0:2], 16), int(hc[2:4], 16), int(hc[4:6], 16))
+                else:
+                    color = MULTI_CATEGORY_COLORS[cat_idx % len(MULTI_CATEGORY_COLORS)]
                 category_templates.append({
                     "name": cat_name, "template": template, "color": color,
                     "category_id": cat_idx + 1, "area_ratio": ref_area_ratio,
@@ -651,8 +666,13 @@ def process_instance_annotation(
                 template = dino.fuse_multi_ref_features(aux_feats, aux_weights)
 
             ref_area_ratio = float(selected_mask.sum()) / (ref_image.size[0] * ref_image.size[1])
+            if category_color and isinstance(category_color, str) and category_color.startswith('#'):
+                hc = category_color.lstrip('#')
+                single_color = (int(hc[0:2], 16), int(hc[2:4], 16), int(hc[4:6], 16))
+            else:
+                single_color = MASK_MODE3_COLOR
             category_templates.append({
-                "name": "instance_target", "template": template, "color": MASK_MODE3_COLOR,
+                "name": "instance_target", "template": template, "color": single_color,
                 "category_id": 1, "area_ratio": ref_area_ratio,
             })
 

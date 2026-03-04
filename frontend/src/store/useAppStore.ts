@@ -369,11 +369,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   setMode1CategoryId: (id) => set({ mode1CategoryId: id }),
 
   // ===== 模式2 框选管理（含 imageId 绑定，防跨图残留） =====
+  // 存储时将画布坐标转为原图坐标，避免渲染/提交时坐标偏移
   confirmMode2Bbox: () =>
     set((s) => {
       if (!s.bbox || !s.activeCategoryId) return {};
       const displayId = s.viewingImageId || s.selectedImageId || '';
-      const bboxCopy: BBox = { ...s.bbox };
+      const sc = s.imageFitScale || 1;
+      const ox = s.imageFitOffsetX || 0;
+      const oy = s.imageFitOffsetY || 0;
+      const imgBbox: BBox = {
+        x: (s.bbox.x - ox) / sc,
+        y: (s.bbox.y - oy) / sc,
+        width: s.bbox.width / sc,
+        height: s.bbox.height / sc,
+      };
       const existing = s.mode2CategoryRefs.find(
         (r) => r.categoryId === s.activeCategoryId && r.imageId === displayId
       );
@@ -381,11 +390,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (existing) {
         refs = s.mode2CategoryRefs.map((r) =>
           r.categoryId === s.activeCategoryId && r.imageId === displayId
-            ? { ...r, bboxes: [...r.bboxes, bboxCopy] }
+            ? { ...r, bboxes: [...r.bboxes, imgBbox] }
             : r
         );
       } else {
-        refs = [...s.mode2CategoryRefs, { categoryId: s.activeCategoryId!, imageId: displayId, bboxes: [bboxCopy] }];
+        refs = [...s.mode2CategoryRefs, { categoryId: s.activeCategoryId!, imageId: displayId, bboxes: [imgBbox] }];
       }
       return { mode2CategoryRefs: refs, bbox: null };
     }),

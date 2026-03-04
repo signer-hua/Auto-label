@@ -117,14 +117,29 @@ const Toolbar: React.FC = () => {
     let reqCategories = undefined;
     let reqBbox: [number, number, number, number] = [0, 0, 0, 0];
     let reqRefImages = undefined;
+    let reqCategoryColor: string | undefined = undefined;
 
     if (hasCategories) {
       reqCategories = mode2CategoryRefs.map((ref) => {
         const cat = categories.find(c => c.id === ref.categoryId);
-        return { name: cat?.name || 'unknown', bboxes: ref.bboxes.map(b => [b.x, b.y, b.x + b.width, b.y + b.height] as [number, number, number, number]) };
+        return {
+          name: cat?.name || 'unknown',
+          color: cat?.color,
+          bboxes: ref.bboxes.map(b => [b.x, b.y, b.x + b.width, b.y + b.height] as [number, number, number, number]),
+        };
       });
     } else if (bbox) {
-      reqBbox = [bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height];
+      const st = useAppStore.getState();
+      const sc = st.imageFitScale || 1;
+      const ox = st.imageFitOffsetX || 0;
+      const oy = st.imageFitOffsetY || 0;
+      const x1 = (bbox.x - ox) / sc;
+      const y1 = (bbox.y - oy) / sc;
+      const x2 = (bbox.x + bbox.width - ox) / sc;
+      const y2 = (bbox.y + bbox.height - oy) / sc;
+      reqBbox = [Math.max(0, x1), Math.max(0, y1), x2, y2];
+      const activeCat = activeCategoryId ? categories.find(c => c.id === activeCategoryId) : null;
+      reqCategoryColor = activeCat?.color;
     }
 
     // 参考图库：已有 bbox 的直接使用，无 bbox 但已有 Mask 的用全图作为参考
@@ -147,6 +162,7 @@ const Toolbar: React.FC = () => {
       ref_image_id: refImage.id, ref_image_path: refImage.path,
       bbox: reqBbox, target_images: targetImages,
       categories: reqCategories, ref_images: reqRefImages,
+      category_color: reqCategoryColor,
     });
     setTask(result.task_id, 'pending');
     clearBboxAfterAnnotate();
@@ -189,7 +205,7 @@ const Toolbar: React.FC = () => {
     if (hasCategories) {
       reqCategories = mode3CategoryRefs.map(ref => {
         const cat = categories.find(c => c.id === ref.categoryId);
-        return { name: cat?.name || 'unknown', instance_ids: ref.instanceIds };
+        return { name: cat?.name || 'unknown', instance_ids: ref.instanceIds, color: cat?.color };
       });
     }
     if (refImages.length > 0) {
@@ -206,11 +222,13 @@ const Toolbar: React.FC = () => {
       }).filter(Boolean) as any[];
     }
 
+    const activeCat = activeCategoryId ? categories.find(c => c.id === activeCategoryId) : null;
     const result = await startMode3Select({
       discovery_task_id: discoveryTaskId,
       ref_image_id: refImage.id, ref_image_path: refImage.path,
       selected_instance_id: selectedInstanceIds[0] ?? 0,
       target_images: targetImages, categories: reqCategories, ref_images: reqRefImages,
+      category_color: activeCat?.color,
     });
     setTask(result.task_id, 'pending');
   }, [selectedInstanceIds, selectedImageId, discoveryTaskId, images, categories, mode3CategoryRefs, refImages, setTask]);
