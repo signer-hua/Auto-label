@@ -357,6 +357,43 @@ class SAMEngine:
 
         return corrected
 
+    def load_lora_weights(self, category_id: str) -> bool:
+        """
+        加载指定类别的 LoRA 微调权重。
+        若该类别权重不存在则跳过，使用原生 SAM3 推理。
+
+        Args:
+            category_id: 类别 ID
+
+        Returns:
+            loaded: 是否成功加载
+        """
+        lora_dir = Path(__file__).parent.parent.parent / "weights" / "lora" / f"sam3_lora_{category_id}"
+        if not lora_dir.exists():
+            return False
+
+        try:
+            lora_pt = lora_dir / "lora_weights.pt"
+            if lora_pt.exists():
+                state = torch.load(str(lora_pt), map_location=self.device, weights_only=True)
+                missing, unexpected = self.model.load_state_dict(state, strict=False)
+                logger.info("[SAM3] LoRA weights loaded for category '%s' (%d params)",
+                            category_id, len(state))
+                return True
+
+            try:
+                from peft import PeftModel
+                self.model = PeftModel.from_pretrained(self.model, str(lora_dir))
+                logger.info("[SAM3] LoRA (peft) loaded for category '%s'", category_id)
+                return True
+            except Exception:
+                pass
+
+        except Exception as e:
+            logger.warning("[SAM3] LoRA load failed for '%s': %s", category_id, str(e))
+
+        return False
+
     def release_memory(self) -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

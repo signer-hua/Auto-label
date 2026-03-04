@@ -21,6 +21,53 @@
 
 ---
 
+## v8.0 ProMerge 实例分割 + LoRA 微调 + 效果验证
+
+### ProMerge 谱聚类实例分割（替换 K-Means）
+
+| 功能 | 说明 |
+|------|------|
+| **亲和矩阵计算** | 基于 DINOv3 patch 特征余弦相似度构建亲和矩阵 |
+| **谱聚类** | `SpectralClustering`（Normalized Cut）替代 K-Means，保留空间连续性 |
+| **scikit-image 后处理** | `label` + `regionprops` 过滤面积 < 1% 的碎片，提升实例完整性 |
+| **K-Means 兜底** | ProMerge 失败自动降级至原 K-Means 聚类，功能不降级 |
+| **新增依赖** | `scikit-image>=0.22.0`（PyPI 安装） |
+
+### SAM3 LoRA 参数高效微调
+
+| 功能 | 说明 |
+|------|------|
+| **仅微调 mask_decoder** | 骨干网络冻结，LoRA 参数约 0.5M，峰值显存 ≤ 4GB |
+| **配置** | `r=8, lora_alpha=32, dropout=0.05`，适配消费级 GPU |
+| **训练优化** | `batch_size=1, grad_accum=4, fp16=True`，RTX3060 可训练 |
+| **前端入口** | 高级工具面板：选类别 → 选图片（≥5张）→ 设轮次 → 启动微调 |
+| **推理加载** | `load_lora_weights` 自动检测类别 LoRA 权重并加载 |
+| **新增依赖** | `peft>=0.6.0, accelerate>=0.20.0`（PyPI 安装，可选） |
+
+### 效果验证工具
+
+| 方法 | 说明 |
+|------|------|
+| `calculate_instance_completeness` | 实例数、总覆盖率、平均面积、碎片率统计 |
+| `calculate_mask_miou` | 单 Mask IoU 计算 |
+| `calculate_batch_miou` | 批量 mIoU + 逐实例 IoU 列表 |
+
+### 新增/修改文件
+
+| 文件 | 说明 |
+|------|------|
+| `backend/models/dino_engine.py` | ProMerge 谱聚类 + K-Means 兜底 |
+| `backend/models/sam_engine.py` | `load_lora_weights` 方法 |
+| `backend/utils/lora_finetune.py` | LoRA 配置 + 训练逻辑 |
+| `backend/utils/eval_utils.py` | 完整性 + mIoU 验证 |
+| `backend/api/routes.py` | `/api/annotate/start_lora_finetune` 接口 |
+| `backend/worker.py` | `process_lora_finetune` Celery 任务 |
+| `frontend/src/api/index.ts` | `startLoraFinetune` API |
+| `frontend/src/components/AdvancedTools.tsx` | LoRA 微调面板 |
+| `backend/requirements.txt` | 新增 scikit-image, peft, accelerate |
+
+---
+
 ## v7.5 跨图颜色同步 + 手动标注持久化 + 特征融合
 
 ### 跨图标注颜色统一

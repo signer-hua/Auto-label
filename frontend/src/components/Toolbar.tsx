@@ -22,6 +22,7 @@ import {
   startMode3Discovery, startMode3Select,
 } from '../api';
 import CategoryPanel from './CategoryPanel';
+import AdvancedTools from './AdvancedTools';
 
 const { TextArea } = Input;
 
@@ -524,6 +525,9 @@ const Toolbar: React.FC = () => {
 
       {/* 全局类别面板 */}
       <CategoryPanel />
+
+      {/* 高级工具：LoRA 微调 */}
+      <AdvancedTools />
 
       <Button icon={<ClearOutlined />} onClick={() => { resetTask(); clearCategories(); clearRefImages(); }}
         block size="small" danger style={{ marginTop: 4 }}>重置全部</Button>

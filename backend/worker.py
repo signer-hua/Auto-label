@@ -905,3 +905,66 @@ def process_correct_mask(self, image_path, image_id, positive_boxes, negative_bo
         r.expire(f"task:{task_id}", 3600)
         _release_all_models()
         return {"status": "failed", "task_id": task_id, "error": str(e)}
+
+
+# ==================== LoRA 微调 ====================
+@celery_app.task(name="process_lora_finetune", bind=True, max_retries=0)
+def process_lora_finetune(self, image_paths, image_ids, category_id, epochs, task_id):
+    """SAM3 LoRA 参数高效微调任务"""
+    from backend.models.sam_engine import SAMEngine
+    from backend.core.config import MASK_DIR
+
+    r = _get_redis()
+    try:
+        r.hset(f"task:{task_id}", mapping={
+            "status": "processing", "progress": 0, "total": 1,
+            "message": "Initializing LoRA finetune...", "mode": "lora_finetune",
+        })
+
+        sam = SAMEngine.get_instance()
+
+        train_data = []
+        for img_path, img_id in zip(image_paths, image_ids):
+            masks_for_image = []
+            if MASK_DIR.exists():
+                for mf in MASK_DIR.iterdir():
+                    if mf.name.startswith(img_id) and mf.suffix == '.png':
+                        masks_for_image.append({"mask_path": str(mf)})
+            if masks_for_image:
+                train_data.append({"path": img_path, "masks": masks_for_image})
+
+        if len(train_data) < 3:
+            r.hset(f"task:{task_id}", mapping={
+                "status": "failed", "message": f"有效训练数据不足（{len(train_data)} 张有 Mask）",
+            })
+            r.expire(f"task:{task_id}", REDIS_TASK_EXPIRE)
+            return {"status": "failed", "task_id": task_id}
+
+        r.hset(f"task:{task_id}", "message",
+               f"Setting up LoRA ({len(train_data)} images)...")
+
+        from backend.utils.lora_finetune import setup_lora, finetune_lora
+
+        peft_model = setup_lora(sam.model)
+
+        r.hset(f"task:{task_id}", "message",
+               f"Training LoRA (epoch 0/{epochs})...")
+
+        output_path = finetune_lora(
+            peft_model, train_data, category_id, epochs=epochs,
+        )
+
+        r.hset(f"task:{task_id}", mapping={
+            "status": "success", "progress": 1, "total": 1,
+            "message": f"LoRA finetune completed. Weights: {output_path}",
+        })
+        r.expire(f"task:{task_id}", REDIS_TASK_EXPIRE)
+        _release_all_models()
+        return {"status": "success", "task_id": task_id}
+
+    except Exception as e:
+        logger.exception("[LoRA] Finetune FAILED: %s", str(e))
+        r.hset(f"task:{task_id}", mapping={"status": "failed", "message": str(e)})
+        r.expire(f"task:{task_id}", REDIS_TASK_EXPIRE)
+        _release_all_models()
+        return {"status": "failed", "task_id": task_id, "error": str(e)}

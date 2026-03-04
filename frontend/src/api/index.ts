@@ -176,6 +176,16 @@ export async function deleteImage(imageId: string): Promise<void> {
   await api.delete(`/images/${imageId}`);
 }
 
+// ===== LoRA 微调 =====
+export async function startLoraFinetune(params: {
+  image_ids: string[];
+  category_id: string;
+  epochs: number;
+}): Promise<{ task_id: string; status: string; mode: string }> {
+  const { data } = await api.post('/annotate/start_lora_finetune', params);
+  return data;
+}
+
 // ===== 导出 =====
 export async function exportAnnotations(taskId: string, format: 'coco' | 'voc' | 'yolo'): Promise<any> {
   const { data } = await api.get(`/export/${taskId}/${format}`);

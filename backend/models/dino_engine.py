@@ -551,17 +551,17 @@ class DINOEngine:
         use_elbow: bool = True,
     ) -> tuple[np.ndarray, list[np.ndarray], int, int]:
         """
-        全图 patch 特征 K-Means 聚类（增强版：肘部法则自适应聚类数）。
+        全图 patch 特征实例分割（ProMerge 谱聚类优先，K-Means 兜底）。
 
-        Args:
-            image: PIL Image (RGB)
-            n_clusters: 聚类数量，None 且 use_elbow=True 时自动选择
-            use_elbow: 是否使用肘部法则自动确定聚类数
+        ProMerge 策略：
+        1. 计算 patch 间余弦亲和矩阵
+        2. 基于亲和矩阵做谱聚类（Normalized Cut）
+        3. 用 scikit-image regionprops 后处理，过滤面积 < 1% 的碎片
+        4. 若 ProMerge 失败，自动降级到 K-Means 聚类
 
         Returns:
             cluster_map, instance_masks, h_patches, w_patches
         """
-        from sklearn.cluster import KMeans
         import cv2
 
         if not self._warmed_up:
@@ -569,6 +569,91 @@ class DINOEngine:
 
         img_w, img_h = image.size
         patch_feats, h, w = self.extract_patch_features(image)
+
+        try:
+            cluster_map, instance_masks = self._promerge_segmentation(
+                patch_feats, h, w, img_w, img_h
+            )
+            logger.info("[DINOv3] ProMerge: %d valid instances", len(instance_masks))
+        except Exception as e:
+            logger.warning("[DINOv3] ProMerge failed (%s), falling back to K-Means", str(e))
+            cluster_map, instance_masks = self._kmeans_segmentation(
+                patch_feats, h, w, img_w, img_h, n_clusters, use_elbow
+            )
+
+        return cluster_map, instance_masks, h, w
+
+    def _promerge_segmentation(
+        self,
+        patch_feats: np.ndarray,
+        h: int, w: int,
+        img_w: int, img_h: int,
+    ) -> tuple[np.ndarray, list[np.ndarray]]:
+        """
+        ProMerge 谱聚类实例分割：基于 patch 亲和矩阵的 Normalized Cut。
+
+        步骤：
+        1. 计算 patch 余弦相似度亲和矩阵 A[i,j]
+        2. 对 A 做阈值过滤（去除弱连接，保留强亲和）
+        3. 基于 scipy 稀疏矩阵做谱聚类（sklearn SpectralClustering）
+        4. scikit-image regionprops 过滤碎片实例
+        """
+        from sklearn.cluster import SpectralClustering
+        from skimage.measure import label as sk_label, regionprops
+        import cv2
+
+        n_patches = patch_feats.shape[0]
+
+        affinity = patch_feats @ patch_feats.T
+        np.fill_diagonal(affinity, 0)
+
+        threshold = float(np.percentile(affinity[affinity > 0], 50))
+        affinity[affinity < threshold] = 0
+
+        max_k = min(DINO_ELBOW_MAX_K, n_patches // 4)
+        n_clusters = max(2, min(max_k, 8))
+
+        sc = SpectralClustering(
+            n_clusters=n_clusters,
+            affinity='precomputed',
+            assign_labels='kmeans',
+            random_state=42,
+            n_init=5,
+        )
+        labels = sc.fit_predict(affinity)
+        label_grid = labels.reshape(h, w)
+
+        cluster_map = cv2.resize(
+            label_grid.astype(np.uint8), (img_w, img_h),
+            interpolation=cv2.INTER_NEAREST
+        )
+
+        instance_masks = []
+        total_pixels = img_w * img_h
+        min_area_ratio = 0.01
+
+        for cid in range(n_clusters):
+            binary = (cluster_map == cid).astype(np.uint8)
+            labeled = sk_label(binary, connectivity=2)
+            for region in regionprops(labeled):
+                if region.area / total_pixels < min_area_ratio:
+                    continue
+                mask = (labeled == region.label).astype(bool)
+                instance_masks.append(mask)
+
+        return cluster_map, instance_masks
+
+    def _kmeans_segmentation(
+        self,
+        patch_feats: np.ndarray,
+        h: int, w: int,
+        img_w: int, img_h: int,
+        n_clusters: int | None,
+        use_elbow: bool,
+    ) -> tuple[np.ndarray, list[np.ndarray]]:
+        """K-Means 聚类兜底方案"""
+        from sklearn.cluster import KMeans
+        import cv2
 
         if n_clusters is None and use_elbow:
             n_clusters = self._elbow_optimal_k(patch_feats)
@@ -588,13 +673,12 @@ class DINOEngine:
         total_pixels = img_w * img_h
         for cid in range(n_clusters):
             mask = (cluster_map == cid)
-            ratio = mask.sum() / total_pixels
-            if ratio >= DINO_MIN_CLUSTER_RATIO:
+            if mask.sum() / total_pixels >= DINO_MIN_CLUSTER_RATIO:
                 instance_masks.append(mask)
 
-        logger.info("[DINOv3] Clustering: %d clusters → %d valid instances",
+        logger.info("[DINOv3] K-Means fallback: %d clusters → %d valid instances",
                     n_clusters, len(instance_masks))
-        return cluster_map, instance_masks, h, w
+        return cluster_map, instance_masks
 
     def _elbow_optimal_k(self, features: np.ndarray) -> int:
         """

@@ -621,3 +621,58 @@ async def annotate_correct(req: CorrectMaskRequest):
     logger.info("Correct mask task: %s (image=%s, +%d -%d boxes)",
                 task_id, req.image_id, len(req.positive_boxes), len(req.negative_boxes))
     return {"task_id": task_id, "status": "pending", "mode": "correct"}
+
+
+# ==================== LoRA 微调 ====================
+
+class LoraFinetuneRequest(BaseModel):
+    """LoRA 微调请求"""
+    image_ids: list[str] = Field(..., description="用于微调的标注图片 ID 列表（≥5张）")
+    category_id: str = Field(..., description="目标类别 ID")
+    epochs: int = Field(default=10, description="训练轮次（建议 5~20）")
+
+
+@router.post("/annotate/start_lora_finetune")
+async def start_lora_finetune(req: LoraFinetuneRequest):
+    """
+    启动 SAM3 LoRA 微调任务。
+    基于已标注图片对 SAM3 mask_decoder 做参数高效微调。
+    """
+    if len(req.image_ids) < 5:
+        raise HTTPException(status_code=400, detail="至少需要 5 张标注图片")
+
+    try:
+        from peft import LoraConfig
+    except ImportError:
+        raise HTTPException(status_code=503, detail="LoRA 依赖未安装，请执行: pip install peft accelerate")
+
+    image_paths = []
+    for img_id in req.image_ids:
+        found = False
+        for f in IMAGE_DIR.iterdir():
+            if f.stem == img_id:
+                image_paths.append(str(f))
+                found = True
+                break
+        if not found:
+            raise HTTPException(status_code=404, detail=f"Image not found: {img_id}")
+
+    task_id = uuid.uuid4().hex
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending", "progress": 0, "total": 1,
+        "message": "LoRA finetune queued...", "mode": "lora_finetune",
+    })
+    r.expire(f"task:{task_id}", REDIS_TASK_EXPIRE)
+
+    from backend.worker import process_lora_finetune
+    process_lora_finetune.delay(
+        image_paths=image_paths,
+        image_ids=req.image_ids,
+        category_id=req.category_id,
+        epochs=req.epochs,
+        task_id=task_id,
+    )
+    logger.info("LoRA finetune task: %s (images=%d, category=%s, epochs=%d)",
+                task_id, len(req.image_ids), req.category_id, req.epochs)
+    return {"task_id": task_id, "status": "pending", "mode": "lora_finetune"}
