@@ -21,6 +21,45 @@
 
 ---
 
+## v9.0 精细化橡皮擦 + 导出去重 + 缓存清理
+
+### 精细化橡皮擦
+
+| 功能 | 说明 |
+|------|------|
+| **像素级擦除** | 鼠标拖动沿轨迹以指定半径圆形区域擦除 Mask 像素 |
+| **大小可调** | Slider 调节 3~50px 橡皮擦半径，实时预览 |
+| **后端处理** | `POST /api/annotate/erase` 接收轨迹坐标，OpenCV 圆形区域置零 |
+| **非破坏性** | 仅修改 Alpha 通道像素，保留其余有效区域 |
+
+### 导出重叠去重
+
+| 功能 | 说明 |
+|------|------|
+| **同类别 IoU 检测** | 导出时对同图片同类别标注计算 IoU |
+| **自动合并** | IoU ≥ 0.3 的标注合并为最小外接矩形，仅保留一条记录 |
+| **全格式生效** | COCO/VOC/YOLO 导出均经过去重，避免重复标注 |
+
+### 缓存清理
+
+| 功能 | 说明 |
+|------|------|
+| **重置即清理** | 点击「重置全部」自动调用 `POST /api/clean_cache` |
+| **精准清理** | 递归删除 `data/exports/` 和 `data/masks/` 所有文件，保留 `data/images/` |
+| **Redis 清理** | 同时删除所有 `task:*` 前缀的 Redis 键 |
+| **异常安全** | 文件被占用时跳过并记录日志，不中断流程 |
+
+### 新增/修改文件
+
+| 文件 | 说明 |
+|------|------|
+| `backend/api/routes.py` | `POST /api/clean_cache` + `POST /api/annotate/erase` + 导出去重 |
+| `frontend/src/api/index.ts` | `cleanCache` + `eraseMaskRegion` API |
+| `frontend/src/components/Toolbar.tsx` | 橡皮擦按钮 + 大小调节 + 重置清理 |
+| `frontend/src/components/MainCanvas.tsx` | 橡皮擦交互（轨迹收集+提交） |
+
+---
+
 ## v8.0 ProMerge 实例分割 + LoRA 微调 + 效果验证
 
 ### ProMerge 谱聚类实例分割（替换 K-Means）

@@ -19,7 +19,7 @@ import {
 import { useAppStore, ToolType, AnnotationMode } from '../store/useAppStore';
 import {
   uploadImages, startMode1Annotation, startMode2Annotation,
-  startMode3Discovery, startMode3Select,
+  startMode3Discovery, startMode3Select, cleanCache,
 } from '../api';
 import CategoryPanel from './CategoryPanel';
 import AdvancedTools from './AdvancedTools';
@@ -42,6 +42,7 @@ const Toolbar: React.FC = () => {
     confirmMode2Bbox, clearBboxAfterAnnotate,
     setMode3CategoryInstances, setManualTool,
     clearImageMasks, clearRefImages, undo, redo,
+    brushSize, setBrushSize,
   } = useAppStore();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -487,6 +488,12 @@ const Toolbar: React.FC = () => {
             onClick={() => setManualTool(manualTool === 'negative_box' ? null : 'negative_box')}
             style={manualTool === 'negative_box' ? { background: '#ff4d4f', borderColor: '#ff4d4f' } : {}} />
         </Tooltip>
+        <Tooltip title="橡皮擦（区域擦除）">
+          <Button size="small" icon={<ScissorOutlined />}
+            type={manualTool === 'eraser' ? 'primary' : 'default'}
+            onClick={() => setManualTool(manualTool === 'eraser' ? null : 'eraser')}
+            style={manualTool === 'eraser' ? { background: '#eb2f96', borderColor: '#eb2f96' } : {}} />
+        </Tooltip>
         <Tooltip title="撤销 Ctrl+Z"><Button size="small" icon={<UndoOutlined />} onClick={undo} /></Tooltip>
         <Tooltip title="重做 Ctrl+Shift+Z"><Button size="small" icon={<RedoOutlined />} onClick={redo} /></Tooltip>
         <Tooltip title="清空当前图标注">
@@ -502,6 +509,16 @@ const Toolbar: React.FC = () => {
       )}
       {manualTool === 'negative_box' && (
         <div style={{ color: '#ff4d4f', fontSize: 11, marginTop: 2 }}>红色框选→排除该区域（负向提示）</div>
+      )}
+      {manualTool === 'eraser' && (
+        <>
+          <div style={{ color: '#eb2f96', fontSize: 11, marginTop: 2 }}>拖动擦除 Mask 像素区域</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+            <span style={{ color: '#888', fontSize: 10 }}>大小:</span>
+            <Slider min={3} max={50} value={brushSize} onChange={(v) => setBrushSize(v)}
+              style={{ flex: 1 }} tooltip={{ formatter: (v) => `${v}px` }} />
+          </div>
+        </>
       )}
 
       {/* ===== 缩放控制 ===== */}
@@ -529,7 +546,11 @@ const Toolbar: React.FC = () => {
       {/* 高级工具：LoRA 微调 */}
       <AdvancedTools />
 
-      <Button icon={<ClearOutlined />} onClick={() => { resetTask(); clearCategories(); clearRefImages(); }}
+      <Button icon={<ClearOutlined />} onClick={async () => {
+          resetTask(); clearCategories(); clearRefImages();
+          try { await cleanCache(); message.success('缓存清理完成：exports/masks 已清空'); }
+          catch { /* ignore */ }
+        }}
         block size="small" danger style={{ marginTop: 4 }}>重置全部</Button>
     </div>
   );

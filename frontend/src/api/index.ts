@@ -176,6 +176,23 @@ export async function deleteImage(imageId: string): Promise<void> {
   await api.delete(`/images/${imageId}`);
 }
 
+// ===== 缓存清理 =====
+export async function cleanCache(): Promise<{ message: string; cleaned: Record<string, number> }> {
+  const { data } = await api.post('/clean_cache');
+  return data;
+}
+
+// ===== Mask 区域擦除 =====
+export async function eraseMaskRegion(params: {
+  image_id: string;
+  mask_url: string;
+  erase_points: [number, number][];
+  eraser_size: number;
+}): Promise<{ message: string; mask_url: string; remaining_pixels: number }> {
+  const { data } = await api.post('/annotate/erase', params);
+  return data;
+}
+
 // ===== LoRA 微调 =====
 export async function startLoraFinetune(params: {
   image_ids: string[];

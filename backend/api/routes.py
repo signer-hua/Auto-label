@@ -31,6 +31,49 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["标注"])
 
 
+def _deduplicate_overlapping(annotations: list[dict]) -> list[dict]:
+    """同图片同类别标注重叠去重：IoU >= 0.3 的合并为外接矩形"""
+    from itertools import groupby
+
+    def bbox_iou(a: list[float], b: list[float]) -> float:
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        ix1, iy1 = max(ax, bx), max(ay, by)
+        ix2, iy2 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        union = aw * ah + bw * bh - inter
+        return inter / union if union > 0 else 0
+
+    sorted_anns = sorted(annotations, key=lambda a: (a.get("image_id", ""), a.get("category_id", 0)))
+    result = []
+    for _, group in groupby(sorted_anns, key=lambda a: (a.get("image_id", ""), a.get("category_id", 0))):
+        items = list(group)
+        if len(items) <= 1:
+            result.extend(items)
+            continue
+        merged_flags = [False] * len(items)
+        for i in range(len(items)):
+            if merged_flags[i]:
+                continue
+            current = items[i]
+            cb = list(current["bbox"])
+            for j in range(i + 1, len(items)):
+                if merged_flags[j]:
+                    continue
+                if bbox_iou(cb, items[j]["bbox"]) >= 0.3:
+                    ob = items[j]["bbox"]
+                    nx = min(cb[0], ob[0])
+                    ny = min(cb[1], ob[1])
+                    nw = max(cb[0] + cb[2], ob[0] + ob[2]) - nx
+                    nh = max(cb[1] + cb[3], ob[1] + ob[3]) - ny
+                    cb = [nx, ny, nw, nh]
+                    current["area"] = current.get("area", 0) + items[j].get("area", 0)
+                    merged_flags[j] = True
+            current["bbox"] = cb
+            result.append(current)
+    return result
+
+
 def _get_redis():
     """获取 Redis 连接"""
     return redis.Redis.from_url(REDIS_URL, decode_responses=True)
@@ -501,6 +544,8 @@ async def export_annotations(task_id: str, fmt: str):
 
     coco_data = json.loads(export_path.read_text())
 
+    coco_data["annotations"] = _deduplicate_overlapping(coco_data.get("annotations", []))
+
     if fmt == "coco":
         return coco_data
 
@@ -676,3 +721,83 @@ async def start_lora_finetune(req: LoraFinetuneRequest):
     logger.info("LoRA finetune task: %s (images=%d, category=%s, epochs=%d)",
                 task_id, len(req.image_ids), req.category_id, req.epochs)
     return {"task_id": task_id, "status": "pending", "mode": "lora_finetune"}
+
+
+# ==================== 缓存清理 ====================
+
+@router.post("/clean_cache")
+async def clean_cache():
+    """
+    全局重置时清理 exports/ 和 masks/ 目录下所有文件，仅保留 images/。
+    同时清理 Redis 中所有 task: 前缀的键。
+    """
+    import shutil
+    from backend.core.config import MASK_DIR, EXPORT_DIR
+
+    cleaned = {"masks": 0, "exports": 0, "redis_keys": 0}
+    for d, key in [(MASK_DIR, "masks"), (EXPORT_DIR, "exports")]:
+        if d.exists():
+            count = 0
+            for f in d.iterdir():
+                try:
+                    if f.is_file():
+                        f.unlink()
+                        count += 1
+                except Exception as e:
+                    logger.warning("Failed to delete %s: %s", f, e)
+            cleaned[key] = count
+
+    r = _get_redis()
+    task_keys = r.keys("task:*")
+    if task_keys:
+        r.delete(*task_keys)
+        cleaned["redis_keys"] = len(task_keys)
+
+    logger.info("Cache cleaned: %s", cleaned)
+    return {"message": "缓存清理完成", "cleaned": cleaned}
+
+
+# ==================== Mask 区域擦除 ====================
+
+class EraseMaskRequest(BaseModel):
+    """Mask 区域擦除请求"""
+    image_id: str = Field(..., description="图片 ID")
+    mask_url: str = Field(..., description="要擦除的 Mask URL")
+    erase_points: list[list[float]] = Field(..., description="擦除轨迹坐标 [[x,y], ...]")
+    eraser_size: int = Field(default=15, description="橡皮擦半径（像素）")
+
+
+@router.post("/annotate/erase")
+async def erase_mask_region(req: EraseMaskRequest):
+    """
+    精细化橡皮擦：对指定 Mask 的像素级区域擦除。
+    沿擦除轨迹以 eraser_size 为半径绘制圆形区域并置零。
+    """
+    import cv2
+    import numpy as np
+    from PIL import Image as PILImage
+    from backend.core.config import MASK_DIR
+
+    mask_filename = req.mask_url.split('/')[-1]
+    mask_path = MASK_DIR / mask_filename
+    if not mask_path.exists():
+        raise HTTPException(status_code=404, detail=f"Mask not found: {mask_filename}")
+
+    try:
+        mask_img = PILImage.open(mask_path).convert("RGBA")
+        mask_np = np.array(mask_img)
+
+        for pt in req.erase_points:
+            x, y = int(round(pt[0])), int(round(pt[1]))
+            cv2.circle(mask_np[:, :, 3], (x, y), req.eraser_size, 0, -1)
+
+        erased = PILImage.fromarray(mask_np, mode="RGBA")
+        erased.save(str(mask_path), format="PNG", optimize=True)
+
+        remaining = (mask_np[:, :, 3] > 0).sum()
+        logger.info("Erased mask %s: %d points, remaining pixels=%d",
+                     mask_filename, len(req.erase_points), remaining)
+        return {"message": "擦除完成", "mask_url": req.mask_url, "remaining_pixels": int(remaining)}
+    except Exception as e:
+        logger.exception("Erase failed: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Erase failed: {str(e)}")

@@ -12,7 +12,7 @@ import { Stage, Layer, Image as KonvaImage, Rect } from 'react-konva';
 import { UploadOutlined } from '@ant-design/icons';
 import useImage from 'use-image';
 import { useAppStore } from '../store/useAppStore';
-import { startManualSam, startCorrectMask, getTaskStatus } from '../api';
+import { startManualSam, startCorrectMask, getTaskStatus, eraseMaskRegion } from '../api';
 import { computeFit, canvasToImage, type FitResult } from '../utils/imageAdapter';
 
 function useLoadImage(url: string | null) {
@@ -28,6 +28,8 @@ const MainCanvas: React.FC = () => {
   const [manualRect, setManualRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [negDrawStart, setNegDrawStart] = useState<{ x: number; y: number } | null>(null);
   const [negRect, setNegRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [erasePoints, setErasePoints] = useState<{ x: number; y: number }[]>([]);
+  const [isErasing, setIsErasing] = useState(false);
 
   const {
     images, selectedImageId, viewingImageId,
@@ -43,6 +45,7 @@ const MainCanvas: React.FC = () => {
     negativeBoxes, addNegativeBox, clearNegativeBoxes,
     mode3CategoryRefs, syncActiveCategoryFromInstance,
     imageCategoryColorMap, getResolvedColor,
+    brushSize,
   } = useAppStore();
 
   const displayImageId = viewingImageId || selectedImageId;
@@ -120,6 +123,7 @@ const MainCanvas: React.FC = () => {
   const canDraw = currentMode === 'mode2' && activeTool === 'select';
   const canManualDraw = manualTool === 'rect_manual';
   const canNegativeDraw = manualTool === 'negative_box';
+  const canErase = manualTool === 'eraser';
 
   const handleMouseDown = useCallback((e: any) => {
     const stage = stageRef.current;
@@ -127,6 +131,12 @@ const MainCanvas: React.FC = () => {
     const pos = stage.getRelativePointerPosition();
     if (!pos) return;
 
+    if (canErase) {
+      const imgPt = canvasToImage(pos.x, pos.y, imageFit);
+      setIsErasing(true);
+      setErasePoints([{ x: imgPt.x, y: imgPt.y }]);
+      return;
+    }
     if (canNegativeDraw) {
       setNegDrawStart({ x: pos.x, y: pos.y });
       setNegRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
@@ -149,6 +159,11 @@ const MainCanvas: React.FC = () => {
     const pos = stage.getRelativePointerPosition();
     if (!pos) return;
 
+    if (isErasing && canErase) {
+      const imgPt = canvasToImage(pos.x, pos.y, imageFit);
+      setErasePoints(prev => [...prev, { x: imgPt.x, y: imgPt.y }]);
+      return;
+    }
     if (negDrawStart && canNegativeDraw) {
       setNegRect({
         x: Math.min(negDrawStart.x, pos.x), y: Math.min(negDrawStart.y, pos.y),
@@ -171,6 +186,26 @@ const MainCanvas: React.FC = () => {
   }, [isDrawing, canDraw, canManualDraw, canNegativeDraw, manualDrawStart, negDrawStart, setBBox]);
 
   const handleMouseUp = useCallback(async () => {
+    // 橡皮擦：将擦除轨迹提交后端
+    if (isErasing && canErase && erasePoints.length > 0 && displayImage) {
+      setIsErasing(false);
+      const allMasks = useAppStore.getState().maskUrls[displayImage.id] || [];
+      if (allMasks.length > 0) {
+        const lastMask = allMasks[allMasks.length - 1];
+        try {
+          await eraseMaskRegion({
+            image_id: displayImage.id,
+            mask_url: lastMask,
+            erase_points: erasePoints.map(p => [p.x, p.y] as [number, number]),
+            eraser_size: brushSize,
+          });
+        } catch { /* ignore */ }
+      }
+      setErasePoints([]);
+      return;
+    }
+    setIsErasing(false);
+
     // 负向框选：记录负向框并立即触发修正
     if (negDrawStart && canNegativeDraw && negRect && negRect.w > 5 && negRect.h > 5 && displayImage) {
       setNegDrawStart(null);
@@ -253,7 +288,7 @@ const MainCanvas: React.FC = () => {
     if (!isDrawing) return;
     setIsDrawing(false);
     drawStart.current = null;
-  }, [isDrawing, canManualDraw, canNegativeDraw, manualDrawStart, manualRect, negDrawStart, negRect, displayImage, imageFit, setIsDrawing, addMaskToImage, addNegativeBox, activeCategoryId, categories]);
+  }, [isDrawing, canManualDraw, canNegativeDraw, canErase, isErasing, erasePoints, brushSize, manualDrawStart, manualRect, negDrawStart, negRect, displayImage, imageFit, setIsDrawing, addMaskToImage, addNegativeBox, activeCategoryId, categories]);
 
   const handleWheel = useCallback((e: any) => {
     e.evt.preventDefault();
@@ -289,6 +324,7 @@ const MainCanvas: React.FC = () => {
   }, [toggleInstanceId, syncActiveCategoryFromInstance]);
 
   const getCursor = () => {
+    if (canErase) return 'cell';
     if (canNegativeDraw) return 'not-allowed';
     if (canManualDraw) return 'crosshair';
     if (currentMode === 'mode2' && activeTool === 'select') return 'crosshair';
@@ -296,7 +332,7 @@ const MainCanvas: React.FC = () => {
     return 'zoom-in';
   };
 
-  const isDraggable = !canManualDraw && !canNegativeDraw && (currentMode !== 'mode2' || activeTool === 'pan');
+  const isDraggable = !canManualDraw && !canNegativeDraw && !canErase && (currentMode !== 'mode2' || activeTool === 'pan');
 
   const activeCatColor = useMemo(() => {
     if (!activeCategoryId) return '#ffa500';
