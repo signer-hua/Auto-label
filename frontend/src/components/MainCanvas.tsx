@@ -41,6 +41,7 @@ const MainCanvas: React.FC = () => {
     setStageScale, setStagePosition, setImageFit,
     addMaskToImage, undo, redo,
     negativeBoxes, addNegativeBox, clearNegativeBoxes,
+    mode3CategoryRefs, syncActiveCategoryFromInstance,
   } = useAppStore();
 
   const displayImageId = viewingImageId || selectedImageId;
@@ -277,7 +278,8 @@ const MainCanvas: React.FC = () => {
         s.selectedInstanceIds.length === 1 && s.selectedInstanceIds[0] === instId ? [] : [instId]
       );
     }
-  }, [toggleInstanceId]);
+    syncActiveCategoryFromInstance(instId);
+  }, [toggleInstanceId, syncActiveCategoryFromInstance]);
 
   const getCursor = () => {
     if (canNegativeDraw) return 'not-allowed';
@@ -288,6 +290,12 @@ const MainCanvas: React.FC = () => {
   };
 
   const isDraggable = !canManualDraw && !canNegativeDraw && (currentMode !== 'mode2' || activeTool === 'pan');
+
+  const activeCatColor = useMemo(() => {
+    if (!activeCategoryId) return '#ffa500';
+    const cat = categories.find(c => c.id === activeCategoryId);
+    return cat?.color || '#ffa500';
+  }, [activeCategoryId, categories]);
 
   const modeColors: Record<string, string> = { mode1: 'rgba(0,120,255,0.8)', mode2: 'rgba(255,77,79,0.8)', mode3: 'rgba(0,200,80,0.8)' };
   const modeLabels: Record<string, string> = { mode1: '模式1：文本标注', mode2: '模式2：框选标注', mode3: '模式3：实例标注' };
@@ -325,11 +333,41 @@ const MainCanvas: React.FC = () => {
         {showInstances && (
           <Layer opacity={0.6} x={imageFit.offsetX} y={imageFit.offsetY}
                  scaleX={imageFit.scale} scaleY={imageFit.scale}>
-            {instanceMasks.map((inst) => (
-              <InstanceMaskImage key={`inst-${displayImageId}-${inst.id}`} url={inst.mask_url}
-                isSelected={selectedInstanceIds.includes(inst.id)}
-                onClick={(e: any) => handleInstanceClick(inst.id, e)} />
-            ))}
+            {instanceMasks.map((inst) => {
+              const isSelected = selectedInstanceIds.includes(inst.id);
+              const hasCategory = !!inst.categoryId;
+              return (
+                <InstanceMaskImage key={`inst-${displayImageId}-${inst.id}`} url={inst.mask_url}
+                  isSelected={isSelected} hasCategory={hasCategory}
+                  onClick={(e: any) => handleInstanceClick(inst.id, e)} />
+              );
+            })}
+          </Layer>
+        )}
+
+        {/* Layer: 已分配实例的类别颜色高亮框 */}
+        {showInstances && (
+          <Layer>
+            {instanceMasks
+              .filter(inst => inst.categoryColor && inst.bbox)
+              .map(inst => {
+                const isSelected = selectedInstanceIds.includes(inst.id);
+                const color = inst.categoryColor!;
+                const [bx1, by1, bx2, by2] = inst.bbox;
+                return (
+                  <Rect key={`inst-cat-${inst.id}`}
+                    x={bx1 * imageFit.scale + imageFit.offsetX}
+                    y={by1 * imageFit.scale + imageFit.offsetY}
+                    width={(bx2 - bx1) * imageFit.scale}
+                    height={(by2 - by1) * imageFit.scale}
+                    stroke={color}
+                    strokeWidth={(isSelected ? 3 : 1.5) / stageScale}
+                    dash={isSelected ? undefined : [4 / stageScale, 2 / stageScale]}
+                    fill={`${color}${isSelected ? '30' : '10'}`}
+                    cornerRadius={2}
+                    listening={false} />
+                );
+              })}
           </Layer>
         )}
 
@@ -353,12 +391,12 @@ const MainCanvas: React.FC = () => {
           </Layer>
         )}
 
-        {/* 手动标注矩形预览 */}
+        {/* 手动标注矩形预览（使用当前类别颜色） */}
         {manualRect && manualRect.w > 0 && manualRect.h > 0 && (
           <Layer>
             <Rect x={manualRect.x} y={manualRect.y} width={manualRect.w} height={manualRect.h}
-              stroke="#ffa500" strokeWidth={2 / stageScale}
-              dash={[4 / stageScale, 2 / stageScale]} fill="rgba(255,165,0,0.1)" />
+              stroke={activeCatColor} strokeWidth={2 / stageScale}
+              dash={[4 / stageScale, 2 / stageScale]} fill={`${activeCatColor}1A`} />
           </Layer>
         )}
 
@@ -419,9 +457,12 @@ const MaskImage: React.FC<{ url: string }> = ({ url }) => {
   return image ? <KonvaImage image={image} x={0} y={0} /> : null;
 };
 
-const InstanceMaskImage: React.FC<{ url: string; isSelected: boolean; onClick: (e: any) => void }> = ({ url, isSelected, onClick }) => {
+const InstanceMaskImage: React.FC<{
+  url: string; isSelected: boolean; hasCategory: boolean; onClick: (e: any) => void;
+}> = ({ url, isSelected, hasCategory, onClick }) => {
   const image = useLoadImage(url);
-  return image ? <KonvaImage image={image} x={0} y={0} opacity={isSelected ? 1 : 0.4} onClick={onClick} onTap={onClick} /> : null;
+  const opacity = isSelected ? 1 : hasCategory ? 0.7 : 0.35;
+  return image ? <KonvaImage image={image} x={0} y={0} opacity={opacity} onClick={onClick} onTap={onClick} /> : null;
 };
 
 export default MainCanvas;

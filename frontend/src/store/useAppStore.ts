@@ -28,6 +28,8 @@ export interface InstanceItem {
   mask_url: string;
   bbox: number[];
   color: number[];
+  categoryId: string | null;
+  categoryColor: string | null;
 }
 
 /** 全局类别（跨模式共享，持久化到 localStorage） */
@@ -195,6 +197,8 @@ interface AppState {
   setScoreFilter: (filter: ScoreFilter) => void;
   setSortOrder: (order: SortOrder) => void;
   // 手动标注
+  updateInstanceCategory: (instanceId: number, categoryId: string | null, categoryColor: string | null) => void;
+  syncActiveCategoryFromInstance: (instanceId: number) => void;
   setManualTool: (tool: ManualTool) => void;
   setBrushSize: (size: number) => void;
   addMaskToImage: (imageId: string, maskUrl: string) => void;
@@ -306,7 +310,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setInstanceMasks: (instances, imageId) => {
     const s = get();
-    set({ instanceMasks: instances, instanceMasksImageId: imageId || s.viewingImageId || s.selectedImageId, selectedInstanceIds: [] });
+    const normalized = instances.map(inst => ({
+      ...inst,
+      categoryId: inst.categoryId ?? null,
+      categoryColor: inst.categoryColor ?? null,
+    }));
+    set({ instanceMasks: normalized, instanceMasksImageId: imageId || s.viewingImageId || s.selectedImageId, selectedInstanceIds: [] });
   },
   toggleInstanceId: (id) =>
     set((s) => ({
@@ -412,7 +421,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else {
         refs = [...s.mode3CategoryRefs, { categoryId, instanceIds }];
       }
-      return { mode3CategoryRefs: refs };
+      const cat = s.categories.find(c => c.id === categoryId);
+      const catColor = cat?.color || null;
+      const updatedMasks = s.instanceMasks.map(inst =>
+        instanceIds.includes(inst.id)
+          ? { ...inst, categoryId, categoryColor: catColor }
+          : inst
+      );
+      return { mode3CategoryRefs: refs, instanceMasks: updatedMasks };
     }),
 
   setImageFit: (scale, offsetX, offsetY) =>
@@ -435,6 +451,21 @@ export const useAppStore = create<AppState>((set, get) => ({
   setImageScores: (scores) => set({ imageScores: scores }),
   setScoreFilter: (filter) => set({ scoreFilter: filter }),
   setSortOrder: (order) => set({ sortOrder: order }),
+
+  updateInstanceCategory: (instanceId, categoryId, categoryColor) =>
+    set((s) => ({
+      instanceMasks: s.instanceMasks.map(inst =>
+        inst.id === instanceId ? { ...inst, categoryId, categoryColor } : inst
+      ),
+    })),
+
+  syncActiveCategoryFromInstance: (instanceId) => {
+    const s = get();
+    const inst = s.instanceMasks.find(i => i.id === instanceId);
+    if (inst?.categoryId) {
+      set({ activeCategoryId: inst.categoryId });
+    }
+  },
 
   // ===== 手动标注 =====
   setManualTool: (tool) => set({ manualTool: tool, activeTool: 'select' }),

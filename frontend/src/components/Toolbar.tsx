@@ -439,10 +439,15 @@ const Toolbar: React.FC = () => {
       />
       {activeCategoryId && (() => {
         const cat = categories.find(c => c.id === activeCategoryId);
+        const selectedInst = currentMode === 'mode3' && selectedInstanceIds.length === 1
+          ? instanceMasks.find(i => i.id === selectedInstanceIds[0]) : null;
+        const instLinked = selectedInst?.categoryId === activeCategoryId;
         return cat ? (
           <div style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
             <span style={{ width: 10, height: 10, borderRadius: 2, background: cat.color, display: 'inline-block', flexShrink: 0 }} />
-            <span style={{ color: cat.color }}>手动标注 →「{cat.name}」颜色一致</span>
+            <span style={{ color: cat.color }}>
+              手动标注 →「{cat.name}」{instLinked ? `（实例#${selectedInst!.id}同色）` : ''}
+            </span>
           </div>
         ) : null;
       })()}
