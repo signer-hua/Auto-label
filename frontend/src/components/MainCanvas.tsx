@@ -32,7 +32,7 @@ const MainCanvas: React.FC = () => {
     currentMode, activeTool, bbox, bboxImageId, isDrawing,
     maskUrls, maskOpacity,
     instanceMasks, instanceMasksImageId, selectedInstanceIds,
-    categories, mode2CategoryRefs,
+    categories, activeCategoryId, mode2CategoryRefs,
     stageScale, stagePosition,
     manualTool,
     setBBox, setIsDrawing, toggleInstanceId,
@@ -155,8 +155,14 @@ const MainCanvas: React.FC = () => {
       const tl = canvasToImage(manualRect.x, manualRect.y, imageFit);
       const br = canvasToImage(manualRect.x + manualRect.w, manualRect.y + manualRect.h, imageFit);
       const bboxCoords: [number, number, number, number] = [tl.x, tl.y, br.x, br.y];
+      // 传入当前选中类别的颜色，使手动标注 Mask 与自动标注同类别颜色一致
+      const activeCat = activeCategoryId ? categories.find(c => c.id === activeCategoryId) : null;
       try {
-        const result = await startManualSam({ image_id: displayImage.id, image_path: displayImage.path, bbox: bboxCoords });
+        const result = await startManualSam({
+          image_id: displayImage.id, image_path: displayImage.path, bbox: bboxCoords,
+          category_color: activeCat?.color || null,
+          category_name: activeCat?.name || null,
+        });
         const pollManual = setInterval(async () => {
           const res = await getTaskStatus(result.task_id);
           if (res.status === 'success' && res.mask_url) {

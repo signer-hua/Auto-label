@@ -126,9 +126,13 @@ export async function startMode3Select(params: {
   return data;
 }
 
-// ===== 手动标注 =====
+// ===== 手动标注（支持类别颜色） =====
 export async function startManualSam(params: {
-  image_id: string; image_path: string; bbox: [number, number, number, number];
+  image_id: string;
+  image_path: string;
+  bbox: [number, number, number, number];
+  category_color?: string | null;
+  category_name?: string | null;
 }): Promise<{ task_id: string; status: string; mode: string }> {
   const { data } = await api.post('/annotate/manual', params);
   return data;

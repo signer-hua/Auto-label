@@ -323,6 +323,14 @@ def process_batch_annotation(
                     ri_image = Image.open(ri["path"]).convert("RGB")
                     ri_pp = preprocess_image(ri_image)
                     ri_bbox = ri.get("bbox", bbox)
+                    # 全图参考：裁剪 bbox 到实际图片尺寸
+                    ri_w, ri_h = ri_image.size
+                    ri_bbox = [
+                        max(0, min(ri_bbox[0], ri_w)),
+                        max(0, min(ri_bbox[1], ri_h)),
+                        max(0, min(ri_bbox[2], ri_w)),
+                        max(0, min(ri_bbox[3], ri_h)),
+                    ]
                     ri_mask = sam.generate_mask(ri_pp, ri_bbox)
                     if ri_mask.sum() < 10:
                         continue
@@ -684,8 +692,12 @@ def process_instance_annotation(
 
 # ==================== 手动标注：单框触发 SAM3 Mask ====================
 @celery_app.task(name="process_manual_sam", bind=True, max_retries=1)
-def process_manual_sam(self, image_path, image_id, bbox, task_id):
-    """手动标注触发 SAM3 生成 Mask（轻量任务，快速响应）"""
+def process_manual_sam(self, image_path, image_id, bbox, task_id,
+                       category_color=None, category_name=None):
+    """
+    手动标注触发 SAM3 生成 Mask。
+    支持传入类别颜色，使手动标注 Mask 与自动标注同类别颜色一致。
+    """
     from backend.models.sam_engine import SAMEngine
     from backend.services.mask_utils import mask_to_transparent_png
     from backend.services.storage import get_mask_path, get_mask_url
@@ -702,9 +714,16 @@ def process_manual_sam(self, image_path, image_id, bbox, task_id):
             r.expire(f"task:{task_id}", 3600)
             return {"status": "failed", "task_id": task_id}
 
+        # 使用传入的类别颜色，否则使用默认橙色
+        if category_color and isinstance(category_color, str) and category_color.startswith('#'):
+            hex_c = category_color.lstrip('#')
+            color = (int(hex_c[0:2], 16), int(hex_c[2:4], 16), int(hex_c[4:6], 16))
+        else:
+            color = (255, 165, 0)
+
         inst_idx = int(time.time() * 1000) % 10000
         mask_path = get_mask_path(image_id, inst_idx)
-        mask_to_transparent_png(precise_mask, mask_path, color=(255, 165, 0), alpha=140)
+        mask_to_transparent_png(precise_mask, mask_path, color=color, alpha=140)
         mask_url = get_mask_url(image_id, inst_idx)
 
         r.hset(f"task:{task_id}", mapping={

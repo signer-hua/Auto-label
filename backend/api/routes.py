@@ -110,10 +110,12 @@ class Mode3SelectRequest(BaseModel):
 
 
 class ManualSamRequest(BaseModel):
-    """手动标注触发 SAM3 请求"""
+    """手动标注触发 SAM3 请求（支持类别颜色）"""
     image_id: str = Field(..., description="图片 ID")
     image_path: str = Field(..., description="图片路径")
     bbox: list[float] = Field(..., description="手动框选坐标 [x1,y1,x2,y2]")
+    category_color: str | None = Field(None, description="类别颜色 hex（如 #FF5733）")
+    category_name: str | None = Field(None, description="类别名称")
 
 
 class TaskStatusResponse(BaseModel):
@@ -561,6 +563,8 @@ async def annotate_manual(req: ManualSamRequest):
     process_manual_sam.delay(
         image_path=req.image_path, image_id=req.image_id,
         bbox=req.bbox, task_id=task_id,
+        category_color=req.category_color,
+        category_name=req.category_name,
     )
     logger.info("Manual SAM task: %s (image=%s)", task_id, req.image_id)
     return {"task_id": task_id, "status": "pending", "mode": "manual"}

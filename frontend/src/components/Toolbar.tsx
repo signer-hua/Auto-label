@@ -105,8 +105,10 @@ const Toolbar: React.FC = () => {
     if (!selectedImageId) { message.warning('请先选择参考图'); return; }
     const refImage = images.find(i => i.id === selectedImageId);
     if (!refImage) return;
-    const targetImages = images.filter(i => i.id !== selectedImageId).map(i => ({ id: i.id, path: i.path }));
-    if (targetImages.length === 0) { message.warning('请上传至少 2 张图片'); return; }
+    // 参考图（主参考+图库中的）不作为标注目标；其余图片均为待标注目标
+    const refIds = new Set([selectedImageId, ...refImages.map(r => r.imageId)]);
+    const targetImages = images.filter(i => !refIds.has(i.id)).map(i => ({ id: i.id, path: i.path }));
+    if (targetImages.length === 0) { message.warning('请上传更多图片（参考图不包含在标注目标中）'); return; }
 
     const hasCategories = categories.length > 0 && mode2CategoryRefs.length > 0;
     const hasSingleBbox = bbox && bbox.width > 0;
@@ -125,11 +127,20 @@ const Toolbar: React.FC = () => {
       reqBbox = [bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height];
     }
 
+    // 参考图库：已有 bbox 的直接使用，无 bbox 但已有 Mask 的用全图作为参考
     if (refImages.length > 0) {
-      reqRefImages = refImages.filter(ri => ri.bbox).map(ri => {
+      reqRefImages = refImages.map(ri => {
         const img = images.find(i => i.id === ri.imageId);
-        return { path: img?.path || '', bbox: [ri.bbox!.x, ri.bbox!.y, ri.bbox!.x + ri.bbox!.width, ri.bbox!.y + ri.bbox!.height] as [number, number, number, number], weight: ri.weight };
-      });
+        if (!img) return null;
+        const hasMask = (useAppStore.getState().maskUrls[ri.imageId] || []).length > 0;
+        if (ri.bbox) {
+          return { path: img.path, bbox: [ri.bbox.x, ri.bbox.y, ri.bbox.x + ri.bbox.width, ri.bbox.y + ri.bbox.height] as [number, number, number, number], weight: ri.weight };
+        } else if (hasMask) {
+          // 已标注图片无需手动框选，使用全图区域作为参考
+          return { path: img.path, bbox: [0, 0, 9999, 9999] as [number, number, number, number], weight: ri.weight };
+        }
+        return null;
+      }).filter(Boolean) as any[];
     }
 
     const result = await startMode2Annotation({
@@ -138,11 +149,10 @@ const Toolbar: React.FC = () => {
       categories: reqCategories, ref_images: reqRefImages,
     });
     setTask(result.task_id, 'pending');
-
-    // 修复模式2框选残留：标注提交后立即清空框选
     clearBboxAfterAnnotate();
 
-    message.info(`模式2 已提交（${targetImages.length} 张待标注）`);
+    const refCount = 1 + (reqRefImages?.length || 0);
+    message.info(`模式2 已提交（${refCount} 张参考图，${targetImages.length} 张待标注）`);
   }, [selectedImageId, bbox, images, categories, mode2CategoryRefs, refImages, setTask, clearBboxAfterAnnotate]);
 
   // ===== 模式3 =====
@@ -166,8 +176,9 @@ const Toolbar: React.FC = () => {
     if (!selectedImageId || !discoveryTaskId) return;
     const refImage = images.find(i => i.id === selectedImageId);
     if (!refImage) return;
-    const targetImages = images.filter(i => i.id !== selectedImageId).map(i => ({ id: i.id, path: i.path }));
-    if (targetImages.length === 0) { message.warning('请上传至少 2 张图片'); return; }
+    const refIds = new Set([selectedImageId, ...refImages.map(r => r.imageId)]);
+    const targetImages = images.filter(i => !refIds.has(i.id)).map(i => ({ id: i.id, path: i.path }));
+    if (targetImages.length === 0) { message.warning('请上传更多图片'); return; }
 
     const hasCategories = categories.length > 0 && mode3CategoryRefs.length > 0;
     if (!hasCategories && selectedInstanceIds.length === 0) { message.warning('请先选择实例'); return; }
@@ -182,10 +193,17 @@ const Toolbar: React.FC = () => {
       });
     }
     if (refImages.length > 0) {
-      reqRefImages = refImages.filter(ri => ri.bbox).map(ri => {
+      reqRefImages = refImages.map(ri => {
         const img = images.find(i => i.id === ri.imageId);
-        return { path: img?.path || '', bbox: [ri.bbox!.x, ri.bbox!.y, ri.bbox!.x + ri.bbox!.width, ri.bbox!.y + ri.bbox!.height] as [number, number, number, number], weight: ri.weight };
-      });
+        if (!img) return null;
+        const hasMask = (useAppStore.getState().maskUrls[ri.imageId] || []).length > 0;
+        if (ri.bbox) {
+          return { path: img.path, bbox: [ri.bbox.x, ri.bbox.y, ri.bbox.x + ri.bbox.width, ri.bbox.y + ri.bbox.height] as [number, number, number, number], weight: ri.weight };
+        } else if (hasMask) {
+          return { path: img.path, bbox: [0, 0, 9999, 9999] as [number, number, number, number], weight: ri.weight };
+        }
+        return null;
+      }).filter(Boolean) as any[];
     }
 
     const result = await startMode3Select({
@@ -360,6 +378,27 @@ const Toolbar: React.FC = () => {
       {/* ===== 手动标注工具 ===== */}
       <Divider style={{ margin: '4px 0', borderColor: '#444' }} />
       <div style={{ color: '#999', fontSize: 12 }}>手动标注（兜底修正）</div>
+      {/* 手动标注类别选择器：确保手动 Mask 与自动标注同类别颜色一致 */}
+      <Select
+        value={activeCategoryId || undefined}
+        onChange={(v) => setActiveCategoryId(v)}
+        placeholder="选择类别（手动标注颜色）"
+        size="small"
+        style={{ width: '100%', marginBottom: 4 }}
+        options={categories.map(c => ({
+          value: c.id,
+          label: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: c.color, display: 'inline-block' }} />{c.name}</span>,
+        }))}
+      />
+      {activeCategoryId && (
+        <div style={{ fontSize: 11, color: categories.find(c => c.id === activeCategoryId)?.color || '#888', marginBottom: 2 }}>
+          手动标注将使用「{categories.find(c => c.id === activeCategoryId)?.name}」的颜色
+        </div>
+      )}
+      {!activeCategoryId && categories.length > 0 && (
+        <div style={{ fontSize: 11, color: '#faad14', marginBottom: 2 }}>请选择类别后再手动标注</div>
+      )}
       <Space wrap>
         <Tooltip title="矩形→SAM3 Mask">
           <Button size="small" icon={<BorderOutlined />}
