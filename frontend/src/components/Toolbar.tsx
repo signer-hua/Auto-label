@@ -8,12 +8,13 @@
  *   - 手动标注工具集
  */
 import React, { useCallback, useRef } from 'react';
-import { Button, Divider, Tooltip, Input, message, Radio, Space, Slider, Select } from 'antd';
+import { Button, Divider, Tooltip, Input, message, Radio, Space, Slider, Select, Popconfirm } from 'antd';
 import {
   SelectOutlined, DragOutlined, ZoomInOutlined, PlayCircleOutlined,
   ClearOutlined, UploadOutlined, FontSizeOutlined, AimOutlined,
   ThunderboltOutlined, AppstoreOutlined, SearchOutlined,
   CheckOutlined, BorderOutlined, UndoOutlined, RedoOutlined, ScissorOutlined,
+  HighlightOutlined, DeleteOutlined,
   ZoomInOutlined as ZoomInBtn, ZoomOutOutlined, FullscreenOutlined,
 } from '@ant-design/icons';
 import { useAppStore, ToolType, AnnotationMode } from '../store/useAppStore';
@@ -488,8 +489,8 @@ const Toolbar: React.FC = () => {
             onClick={() => setManualTool(manualTool === 'negative_box' ? null : 'negative_box')}
             style={manualTool === 'negative_box' ? { background: '#ff4d4f', borderColor: '#ff4d4f' } : {}} />
         </Tooltip>
-        <Tooltip title="橡皮擦（区域擦除）">
-          <Button size="small" icon={<ScissorOutlined />}
+        <Tooltip title="橡皮擦（拖动擦除 Mask）">
+          <Button size="small" icon={<HighlightOutlined />}
             type={manualTool === 'eraser' ? 'primary' : 'default'}
             onClick={() => setManualTool(manualTool === 'eraser' ? null : 'eraser')}
             style={manualTool === 'eraser' ? { background: '#eb2f96', borderColor: '#eb2f96' } : {}} />
@@ -497,7 +498,7 @@ const Toolbar: React.FC = () => {
         <Tooltip title="撤销 Ctrl+Z"><Button size="small" icon={<UndoOutlined />} onClick={undo} /></Tooltip>
         <Tooltip title="重做 Ctrl+Shift+Z"><Button size="small" icon={<RedoOutlined />} onClick={redo} /></Tooltip>
         <Tooltip title="清空当前图标注">
-          <Button size="small" danger icon={<ScissorOutlined />}
+          <Button size="small" danger icon={<DeleteOutlined />}
             onClick={() => {
               if (displayImageId) clearImageMasks(displayImageId);
               useAppStore.getState().clearNegativeBoxes();
@@ -546,12 +547,22 @@ const Toolbar: React.FC = () => {
       {/* 高级工具：LoRA 微调 */}
       <AdvancedTools />
 
-      <Button icon={<ClearOutlined />} onClick={async () => {
+      <Popconfirm
+        title="确认重置全部？"
+        description="将清空所有标注、类别、参考图，并删除 exports/masks 缓存文件。此操作不可撤销。"
+        onConfirm={async () => {
           resetTask(); clearCategories(); clearRefImages();
-          try { await cleanCache(); message.success('缓存清理完成：exports/masks 已清空'); }
+          try { await cleanCache(); message.success('重置完成：exports/masks 已清空，仅保留 images'); }
           catch { /* ignore */ }
         }}
-        block size="small" danger style={{ marginTop: 4 }}>重置全部</Button>
+        okText="确认重置"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+      >
+        <Button icon={<ClearOutlined />} block size="small" danger style={{ marginTop: 4 }}>
+          重置全部
+        </Button>
+      </Popconfirm>
     </div>
   );
 };

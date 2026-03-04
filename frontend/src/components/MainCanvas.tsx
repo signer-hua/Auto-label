@@ -8,7 +8,7 @@
  *   - 手动标注矩形工具 + Ctrl+Z/Shift+Z 撤销重做
  */
 import React, { useRef, useCallback, useEffect, useState, useMemo } from 'react';
-import { Stage, Layer, Image as KonvaImage, Rect } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Rect, Circle } from 'react-konva';
 import { UploadOutlined } from '@ant-design/icons';
 import useImage from 'use-image';
 import { useAppStore } from '../store/useAppStore';
@@ -29,7 +29,9 @@ const MainCanvas: React.FC = () => {
   const [negDrawStart, setNegDrawStart] = useState<{ x: number; y: number } | null>(null);
   const [negRect, setNegRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [erasePoints, setErasePoints] = useState<{ x: number; y: number }[]>([]);
+  const [eraseCanvasPoints, setEraseCanvasPoints] = useState<{ x: number; y: number }[]>([]);
   const [isErasing, setIsErasing] = useState(false);
+  const [maskRefreshKey, setMaskRefreshKey] = useState(0);
 
   const {
     images, selectedImageId, viewingImageId,
@@ -135,6 +137,7 @@ const MainCanvas: React.FC = () => {
       const imgPt = canvasToImage(pos.x, pos.y, imageFit);
       setIsErasing(true);
       setErasePoints([{ x: imgPt.x, y: imgPt.y }]);
+      setEraseCanvasPoints([{ x: pos.x, y: pos.y }]);
       return;
     }
     if (canNegativeDraw) {
@@ -151,7 +154,7 @@ const MainCanvas: React.FC = () => {
     drawStart.current = { x: pos.x, y: pos.y };
     setBBox({ x: pos.x, y: pos.y, width: 0, height: 0 });
     setIsDrawing(true);
-  }, [canDraw, canManualDraw, canNegativeDraw, setBBox, setIsDrawing]);
+  }, [canDraw, canManualDraw, canNegativeDraw, canErase, imageFit, setBBox, setIsDrawing]);
 
   const handleMouseMove = useCallback(() => {
     const stage = stageRef.current;
@@ -162,6 +165,7 @@ const MainCanvas: React.FC = () => {
     if (isErasing && canErase) {
       const imgPt = canvasToImage(pos.x, pos.y, imageFit);
       setErasePoints(prev => [...prev, { x: imgPt.x, y: imgPt.y }]);
+      setEraseCanvasPoints(prev => [...prev, { x: pos.x, y: pos.y }]);
       return;
     }
     if (negDrawStart && canNegativeDraw) {
@@ -183,28 +187,35 @@ const MainCanvas: React.FC = () => {
       x: Math.min(drawStart.current.x, pos.x), y: Math.min(drawStart.current.y, pos.y),
       width: Math.abs(pos.x - drawStart.current.x), height: Math.abs(pos.y - drawStart.current.y),
     });
-  }, [isDrawing, canDraw, canManualDraw, canNegativeDraw, manualDrawStart, negDrawStart, setBBox]);
+  }, [isDrawing, isErasing, canDraw, canManualDraw, canNegativeDraw, canErase, imageFit, manualDrawStart, negDrawStart, setBBox]);
 
   const handleMouseUp = useCallback(async () => {
-    // 橡皮擦：将擦除轨迹提交后端
-    if (isErasing && canErase && erasePoints.length > 0 && displayImage) {
+    // 橡皮擦：将擦除轨迹提交后端，完成后强制刷新 Mask 图片
+    if (isErasing && canErase && erasePoints.length > 1 && displayImage) {
       setIsErasing(false);
       const allMasks = useAppStore.getState().maskUrls[displayImage.id] || [];
       if (allMasks.length > 0) {
-        const lastMask = allMasks[allMasks.length - 1];
-        try {
-          await eraseMaskRegion({
-            image_id: displayImage.id,
-            mask_url: lastMask,
-            erase_points: erasePoints.map(p => [p.x, p.y] as [number, number]),
-            eraser_size: brushSize,
-          });
-        } catch { /* ignore */ }
+        for (const maskUrl of allMasks) {
+          try {
+            await eraseMaskRegion({
+              image_id: displayImage.id,
+              mask_url: maskUrl,
+              erase_points: erasePoints.map(p => [p.x, p.y] as [number, number]),
+              eraser_size: brushSize,
+            });
+          } catch { /* ignore */ }
+        }
+        setMaskRefreshKey(prev => prev + 1);
       }
       setErasePoints([]);
+      setEraseCanvasPoints([]);
       return;
     }
-    setIsErasing(false);
+    if (isErasing) {
+      setIsErasing(false);
+      setErasePoints([]);
+      setEraseCanvasPoints([]);
+    }
 
     // 负向框选：记录负向框并立即触发修正
     if (negDrawStart && canNegativeDraw && negRect && negRect.w > 5 && negRect.h > 5 && displayImage) {
@@ -367,11 +378,12 @@ const MainCanvas: React.FC = () => {
           )}
         </Layer>
 
-        {/* Layer2: Mask 结果层（同步缩放偏移） */}
+        {/* Layer2: Mask 结果层（同步缩放偏移，maskRefreshKey 强制刷新擦除结果） */}
         <Layer opacity={maskOpacity} x={imageFit.offsetX} y={imageFit.offsetY}
                scaleX={imageFit.scale} scaleY={imageFit.scale}>
           {currentMaskUrls.map((url, idx) => (
-            <MaskImage key={`${displayImageId}-mask-${idx}`} url={url} />
+            <MaskImage key={`${displayImageId}-mask-${idx}-${maskRefreshKey}`}
+              url={maskRefreshKey > 0 ? `${url}?v=${maskRefreshKey}` : url} />
           ))}
         </Layer>
 
@@ -455,6 +467,18 @@ const MainCanvas: React.FC = () => {
           </Layer>
         )}
 
+        {/* 橡皮擦实时轨迹（粉色圆圈） */}
+        {isErasing && eraseCanvasPoints.length > 0 && (
+          <Layer>
+            {eraseCanvasPoints.map((pt, idx) => (
+              <Circle key={`erase-${idx}`} x={pt.x} y={pt.y}
+                radius={brushSize * imageFit.scale / stageScale}
+                fill="rgba(235,47,150,0.3)" stroke="#eb2f96"
+                strokeWidth={1 / stageScale} listening={false} />
+            ))}
+          </Layer>
+        )}
+
         {/* 已确认的负向框（红色虚线） */}
         {negativeBoxes.length > 0 && (
           <Layer>
@@ -476,7 +500,8 @@ const MainCanvas: React.FC = () => {
 
       <div style={{ position: 'absolute', top: 8, left: 8, background: modeColors[currentMode], color: '#fff', padding: '2px 10px', borderRadius: 4, fontSize: 12, pointerEvents: 'none' }}>
         {modeLabels[currentMode]}
-        {manualTool && <span style={{ marginLeft: 6 }}>| 手动标注</span>}
+        {manualTool === 'eraser' && <span style={{ marginLeft: 6, color: '#eb2f96' }}>| 橡皮擦</span>}
+        {manualTool && manualTool !== 'eraser' && <span style={{ marginLeft: 6 }}>| 手动标注</span>}
       </div>
 
       {currentMode === 'mode3' && selectedInstanceIds.length > 0 && (
