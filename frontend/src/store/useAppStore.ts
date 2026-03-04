@@ -28,9 +28,14 @@ export interface InstanceItem {
   mask_url: string;
   bbox: number[];
   color: number[];
+  /** 实例生成阶段的初始视觉标识色（hex），从 color 数组转换而来 */
+  originalColor: string;
   categoryId: string | null;
   categoryColor: string | null;
 }
+
+/** 图片级类别-视觉标识色映射：{imageId: {categoryId: hexColor}} */
+export type ImageCategoryColorMap = Record<string, Record<string, string>>;
 
 /** 全局类别（跨模式共享，持久化到 localStorage） */
 export interface CategoryItem {
@@ -146,6 +151,8 @@ interface AppState {
   redoStack: HistoryEntry[];
   negativeBoxes: BBox[];
   mode2TextHint: string;
+  /** 图片级类别-视觉标识色映射（首个实例原始色锁定） */
+  imageCategoryColorMap: ImageCategoryColorMap;
 
   // Actions
   setCurrentMode: (mode: AnnotationMode) => void;
@@ -199,6 +206,10 @@ interface AppState {
   // 手动标注
   updateInstanceCategory: (instanceId: number, categoryId: string | null, categoryColor: string | null) => void;
   syncActiveCategoryFromInstance: (instanceId: number) => void;
+  /** 绑定图片级类别视觉标识色（首个实例的原始色锁定，后续不覆盖） */
+  bindCategoryColor: (imageId: string, instanceId: number, categoryId: string) => void;
+  /** 获取图片级解析后的视觉标识色（优先图片级 > 全局类别色 > 默认色） */
+  getResolvedColor: (imageId: string, categoryId: string) => string;
   setManualTool: (tool: ManualTool) => void;
   setBrushSize: (size: number) => void;
   addMaskToImage: (imageId: string, maskUrl: string) => void;
@@ -209,6 +220,12 @@ interface AppState {
   addNegativeBox: (box: BBox) => void;
   clearNegativeBoxes: () => void;
   setMode2TextHint: (text: string) => void;
+}
+
+/** RGB 数组 [r,g,b] 转 hex 字符串 */
+function rgbArrayToHex(color: number[]): string {
+  const [r, g, b] = color;
+  return `#${[r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')}`;
 }
 
 let _nextCatId = Date.now();
@@ -258,6 +275,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   redoStack: [],
   negativeBoxes: [],
   mode2TextHint: '',
+  imageCategoryColorMap: {},
 
   // ===== 模式切换：清空所有模式特有状态 =====
   setCurrentMode: (mode) =>
@@ -312,6 +330,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const s = get();
     const normalized = instances.map(inst => ({
       ...inst,
+      originalColor: inst.originalColor || rgbArrayToHex(inst.color),
       categoryId: inst.categoryId ?? null,
       categoryColor: inst.categoryColor ?? null,
     }));
@@ -421,14 +440,28 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else {
         refs = [...s.mode3CategoryRefs, { categoryId, instanceIds }];
       }
-      const cat = s.categories.find(c => c.id === categoryId);
-      const catColor = cat?.color || null;
+
+      const imageId = s.instanceMasksImageId || s.viewingImageId || s.selectedImageId || '';
+      const newMap = { ...s.imageCategoryColorMap };
+      if (!newMap[imageId]) newMap[imageId] = {};
+
+      if (!newMap[imageId][categoryId] && instanceIds.length > 0) {
+        const firstInst = s.instanceMasks.find(i => i.id === instanceIds[0]);
+        if (firstInst) {
+          newMap[imageId][categoryId] = firstInst.originalColor || rgbArrayToHex(firstInst.color);
+        }
+      }
+
+      const resolvedColor = newMap[imageId]?.[categoryId]
+        || s.categories.find(c => c.id === categoryId)?.color
+        || '#CCCCCC';
+
       const updatedMasks = s.instanceMasks.map(inst =>
         instanceIds.includes(inst.id)
-          ? { ...inst, categoryId, categoryColor: catColor }
+          ? { ...inst, categoryId, categoryColor: resolvedColor }
           : inst
       );
-      return { mode3CategoryRefs: refs, instanceMasks: updatedMasks };
+      return { mode3CategoryRefs: refs, instanceMasks: updatedMasks, imageCategoryColorMap: newMap };
     }),
 
   setImageFit: (scale, offsetX, offsetY) =>
@@ -465,6 +498,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (inst?.categoryId) {
       set({ activeCategoryId: inst.categoryId });
     }
+  },
+
+  bindCategoryColor: (imageId, instanceId, categoryId) =>
+    set((s) => {
+      const newMap = { ...s.imageCategoryColorMap };
+      if (!newMap[imageId]) newMap[imageId] = {};
+      if (newMap[imageId][categoryId]) return {};
+      const inst = s.instanceMasks.find(i => i.id === instanceId);
+      if (!inst) return {};
+      newMap[imageId][categoryId] = inst.originalColor || rgbArrayToHex(inst.color);
+      return { imageCategoryColorMap: newMap };
+    }),
+
+  getResolvedColor: (imageId, categoryId) => {
+    const s = get();
+    const mapped = s.imageCategoryColorMap[imageId]?.[categoryId];
+    if (mapped) return mapped;
+    const cat = s.categories.find(c => c.id === categoryId);
+    return cat?.color || '#CCCCCC';
   },
 
   // ===== 手动标注 =====

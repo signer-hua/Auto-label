@@ -379,9 +379,13 @@ const Toolbar: React.FC = () => {
                   const assignedRef = mode3CategoryRefs.find(r => r.instanceIds.includes(inst.id));
                   const assignedCat = assignedRef ? categories.find(c => c.id === assignedRef.categoryId) : null;
                   const isSelected = selectedInstanceIds.includes(inst.id);
-                  const borderColor = assignedCat ? assignedCat.color : `rgb(${inst.color.join(',')})`;
+                  const resolvedColor = assignedCat && displayImageId
+                    ? useAppStore.getState().getResolvedColor(displayImageId, assignedRef!.categoryId)
+                    : inst.originalColor || `rgb(${inst.color.join(',')})`;
                   return (
-                    <Tooltip key={inst.id} title={assignedCat ? `已分配→${assignedCat.name}` : '未分配'}>
+                    <Tooltip key={inst.id} title={assignedCat
+                      ? `已分配→${assignedCat.name}（色:${resolvedColor}）`
+                      : `未分配（原始色:${inst.originalColor || ''}）`}>
                       <Button size="small"
                         type={isSelected ? 'primary' : 'default'}
                         onClick={() => {
@@ -391,8 +395,8 @@ const Toolbar: React.FC = () => {
                           );
                         }}
                         style={{
-                          borderColor, minWidth: 40,
-                          background: assignedCat && !isSelected ? `${assignedCat.color}22` : undefined,
+                          borderColor: resolvedColor, minWidth: 40,
+                          background: assignedCat && !isSelected ? `${resolvedColor}22` : undefined,
                         }}>
                         #{inst.id}{assignedCat ? '✓' : ''}
                       </Button>
@@ -439,17 +443,26 @@ const Toolbar: React.FC = () => {
       />
       {activeCategoryId && (() => {
         const cat = categories.find(c => c.id === activeCategoryId);
+        if (!cat) return null;
+        const resolvedColor = displayImageId
+          ? useAppStore.getState().getResolvedColor(displayImageId, activeCategoryId)
+          : cat.color;
+        const isBound = displayImageId
+          ? !!useAppStore.getState().imageCategoryColorMap[displayImageId]?.[activeCategoryId]
+          : false;
         const selectedInst = currentMode === 'mode3' && selectedInstanceIds.length === 1
           ? instanceMasks.find(i => i.id === selectedInstanceIds[0]) : null;
         const instLinked = selectedInst?.categoryId === activeCategoryId;
-        return cat ? (
+        return (
           <div style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
-            <span style={{ width: 10, height: 10, borderRadius: 2, background: cat.color, display: 'inline-block', flexShrink: 0 }} />
-            <span style={{ color: cat.color }}>
-              手动标注 →「{cat.name}」{instLinked ? `（实例#${selectedInst!.id}同色）` : ''}
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: resolvedColor, display: 'inline-block', flexShrink: 0 }} />
+            <span style={{ color: resolvedColor }}>
+              手动标注 →「{cat.name}」
+              {isBound ? '（实例绑定色）' : ''}
+              {instLinked ? `（#${selectedInst!.id}同色）` : ''}
             </span>
           </div>
-        ) : null;
+        );
       })()}
       {!activeCategoryId && categories.length > 0 && (
         <div style={{ fontSize: 11, color: '#faad14', marginBottom: 2 }}>请选择类别后再手动标注</div>

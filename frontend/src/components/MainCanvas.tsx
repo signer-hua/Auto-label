@@ -42,6 +42,7 @@ const MainCanvas: React.FC = () => {
     addMaskToImage, undo, redo,
     negativeBoxes, addNegativeBox, clearNegativeBoxes,
     mode3CategoryRefs, syncActiveCategoryFromInstance,
+    imageCategoryColorMap, getResolvedColor,
   } = useAppStore();
 
   const displayImageId = viewingImageId || selectedImageId;
@@ -178,6 +179,9 @@ const MainCanvas: React.FC = () => {
       addNegativeBox({ x: negRect.x, y: negRect.y, width: negRect.w, height: negRect.h });
 
       const activeCat = activeCategoryId ? categories.find(c => c.id === activeCategoryId) : null;
+      const resolvedNegColor = activeCategoryId
+        ? getResolvedColor(displayImage.id, activeCategoryId)
+        : (activeCat?.color || null);
       const currentMasks = useAppStore.getState().maskUrls[displayImage.id] || [];
       if (currentMasks.length > 0) {
         try {
@@ -197,7 +201,7 @@ const MainCanvas: React.FC = () => {
             image_id: displayImage.id, image_path: displayImage.path,
             positive_boxes: posBoxes,
             negative_boxes: allNegBoxes,
-            category_color: activeCat?.color || null,
+            category_color: resolvedNegColor,
             category_name: activeCat?.name || null,
           });
           const pollCorrect = setInterval(async () => {
@@ -218,17 +222,20 @@ const MainCanvas: React.FC = () => {
     }
     setNegDrawStart(null);
 
-    // 手动标注矩形：画布坐标 → 原图坐标 → 发送后端
+    // 手动标注矩形：画布坐标 → 原图坐标 → 发送后端（使用图片级解析色）
     if (manualDrawStart && canManualDraw && manualRect && manualRect.w > 10 && manualRect.h > 10 && displayImage) {
       setManualDrawStart(null);
       const tl = canvasToImage(manualRect.x, manualRect.y, imageFit);
       const br = canvasToImage(manualRect.x + manualRect.w, manualRect.y + manualRect.h, imageFit);
       const bboxCoords: [number, number, number, number] = [tl.x, tl.y, br.x, br.y];
       const activeCat = activeCategoryId ? categories.find(c => c.id === activeCategoryId) : null;
+      const resolvedColor = activeCategoryId
+        ? getResolvedColor(displayImage.id, activeCategoryId)
+        : (activeCat?.color || null);
       try {
         const result = await startManualSam({
           image_id: displayImage.id, image_path: displayImage.path, bbox: bboxCoords,
-          category_color: activeCat?.color || null,
+          category_color: resolvedColor,
           category_name: activeCat?.name || null,
         });
         const pollManual = setInterval(async () => {
@@ -293,9 +300,12 @@ const MainCanvas: React.FC = () => {
 
   const activeCatColor = useMemo(() => {
     if (!activeCategoryId) return '#ffa500';
+    if (displayImageId) {
+      return getResolvedColor(displayImageId, activeCategoryId);
+    }
     const cat = categories.find(c => c.id === activeCategoryId);
     return cat?.color || '#ffa500';
-  }, [activeCategoryId, categories]);
+  }, [activeCategoryId, categories, displayImageId, imageCategoryColorMap]);
 
   const modeColors: Record<string, string> = { mode1: 'rgba(0,120,255,0.8)', mode2: 'rgba(255,77,79,0.8)', mode3: 'rgba(0,200,80,0.8)' };
   const modeLabels: Record<string, string> = { mode1: '模式1：文本标注', mode2: '模式2：框选标注', mode3: '模式3：实例标注' };
