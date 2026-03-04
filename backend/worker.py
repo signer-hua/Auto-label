@@ -1,13 +1,22 @@
 """
-Celery Worker 入口（v3 增强版）
+Celery Worker 入口（v4 增强版）
 
-v3 增强：
-    - 多参考图加权融合（2~5张参考图，自定义权重）
-    - 置信度评分集成（标注完成后自动计算每图0~100分）
-    - match_in_image 返回相似度值用于评分
+v4 增强：
+    - MRF 多参考融合器集成（DINOv3 低层/高层特征融合）
+    - ACT/ACF 动态阈值体系
+    - SAM3 PCS 范式（图像示例+坐标+文本提示混合推理）
+    - 输入分辨率统一限制（长边 ≤ 1024）
+    - 人机协同负向提示修正
+    - Celery 多队列优先级分离
+    - 显存优化：全模式半精度推理
 
 启动命令：
-    celery -A backend.worker worker --concurrency=1 --pool=solo -l info
+    # 启动全部队列
+    celery -A backend.worker worker --concurrency=1 --pool=solo -l info -Q high_priority,low_priority,celery
+
+    # 或分别启动高/低优先级 Worker
+    # celery -A backend.worker worker --concurrency=1 --pool=solo -l info -Q high_priority
+    # celery -A backend.worker worker --concurrency=1 --pool=solo -l info -Q low_priority
 """
 import json
 import time
@@ -45,6 +54,19 @@ celery_app.conf.update(
     task_track_started=True,
     task_time_limit=600,
     task_soft_time_limit=300,
+    task_default_queue="low_priority",
+    task_queues={
+        "high_priority": {"exchange": "high_priority", "routing_key": "high"},
+        "low_priority": {"exchange": "low_priority", "routing_key": "low"},
+    },
+    task_routes={
+        "process_manual_sam": {"queue": "high_priority"},
+        "process_correct_mask": {"queue": "high_priority"},
+        "process_text_annotation": {"queue": "low_priority"},
+        "process_batch_annotation": {"queue": "low_priority"},
+        "process_instance_discovery": {"queue": "high_priority"},
+        "process_instance_annotation": {"queue": "low_priority"},
+    },
 )
 
 
@@ -91,7 +113,10 @@ def _handle_gpu_oom(r, task_id: str, e: Exception):
 
 
 def preprocess_image(image: Image.Image) -> Image.Image:
-    """图像预处理：高斯去噪 + CLAHE 对比度增强"""
+    """图像预处理：分辨率限制 + 高斯去噪 + CLAHE 对比度增强"""
+    from backend.services.image_utils import resize_image
+    image = resize_image(image)
+
     img_np = np.array(image)
     if PREPROCESS_DENOISE:
         img_np = cv2.GaussianBlur(img_np, (3, 3), 0)
@@ -311,20 +336,20 @@ def process_batch_annotation(
                     "category_id": cat_idx + 1, "area_ratio": ref_area_ratio,
                 })
         else:
-            # 单类别：支持多参考图或单参考图
+            # 单类别：MRF融合器增强的多参考图/单参考图特征提取
             ref_feats, ref_weights = [], []
+            ref_low_feats, ref_high_feats = [], []
             ref_area_ratio = 0.05
 
             if ref_images and len(ref_images) > 0:
                 r.hset(f"task:{task_id}", "message",
-                       f"Fusing {len(ref_images)} reference images...")
+                       f"Fusing {len(ref_images)} reference images (MRF)...")
                 total_area = 0
                 for ri in ref_images:
                     ri_image = Image.open(ri["path"]).convert("RGB")
                     ri_pp = preprocess_image(ri_image)
                     ri_bbox = ri.get("bbox", bbox)
-                    # 全图参考：裁剪 bbox 到实际图片尺寸
-                    ri_w, ri_h = ri_image.size
+                    ri_w, ri_h = ri_pp.size
                     ri_bbox = [
                         max(0, min(ri_bbox[0], ri_w)),
                         max(0, min(ri_bbox[1], ri_h)),
@@ -338,12 +363,29 @@ def process_batch_annotation(
                     ref_feats.append(feat)
                     ref_weights.append(ri.get("weight", 1.0))
                     total_area += ri_mask.sum()
-                    ref_area_ratio = float(total_area / len(ref_feats)) / (
-                        ri_image.size[0] * ri_image.size[1])
+                    ref_area_ratio = float(total_area / len(ref_feats)) / (ri_w * ri_h)
+
+                    try:
+                        ml_feats = dino.extract_multilayer_mask_features(ri_pp, ri_mask, layers=(9, 12))
+                        ref_low_feats.append(ml_feats[9])
+                        ref_high_feats.append(ml_feats[12])
+                    except Exception:
+                        ref_low_feats.append(feat)
+                        ref_high_feats.append(feat)
 
                 if not ref_feats:
                     raise ValueError("All reference images produced empty masks")
-                template = dino.fuse_multi_ref_features(ref_feats, ref_weights)
+
+                if len(ref_feats) > 1 and len(ref_low_feats) == len(ref_feats):
+                    try:
+                        from backend.models.mrf_engine import get_mrf_instance
+                        mrf = get_mrf_instance(embed_dim=384)
+                        template = mrf.fuse_features(ref_low_feats, ref_high_feats, ref_weights)
+                    except Exception as mrf_err:
+                        logger.warning("[MRF] Fallback to simple fusion: %s", str(mrf_err))
+                        template = dino.fuse_multi_ref_features(ref_feats, ref_weights)
+                else:
+                    template = dino.fuse_multi_ref_features(ref_feats, ref_weights)
             else:
                 ref_image = Image.open(ref_image_path).convert("RGB")
                 ref_pp = preprocess_image(ref_image)
@@ -351,7 +393,7 @@ def process_batch_annotation(
                 if ref_mask.sum() < 10:
                     raise ValueError("Reference mask is too small")
                 template = dino.extract_mask_feature(ref_pp, ref_mask)
-                ref_area_ratio = float(ref_mask.sum()) / (ref_image.size[0] * ref_image.size[1])
+                ref_area_ratio = float(ref_mask.sum()) / (ref_pp.size[0] * ref_pp.size[1])
 
             category_templates.append({
                 "name": "target", "template": template, "color": (255, 80, 80),
@@ -422,6 +464,17 @@ def process_batch_annotation(
             image_scores[img_id] = compute_image_score(sim_vals, cov_vals, area_vals, len(image_mask_urls))
             logger.info("[Task %s] Image %d/%d done (%.2fs), %d inst, score=%.0f",
                         task_id, idx+1, total, time.time()-t0, len(image_mask_urls), image_scores[img_id]["total"])
+
+        # ACF 动态置信过滤：移除低置信图片的标注
+        from backend.utils.threshold_utils import adaptive_confidence_filter
+        all_scores = [sc["total"] / 100.0 for sc in image_scores.values() if sc["total"] > 0]
+        if len(all_scores) >= 3:
+            acf_threshold = adaptive_confidence_filter(all_scores)
+            for img_id_check in list(image_scores.keys()):
+                if image_scores[img_id_check]["total"] / 100.0 < acf_threshold:
+                    image_scores[img_id_check]["acf_filtered"] = True
+                    logger.info("[ACF] Image %s score %.1f below threshold %.3f",
+                                img_id_check, image_scores[img_id_check]["total"], acf_threshold)
 
         coco_cats = [{"id": ct["category_id"], "name": ct["name"], "supercategory": "object"} for ct in category_templates]
         coco_result = {"images": coco_images, "annotations": coco_annotations, "categories": coco_cats}
@@ -735,6 +788,61 @@ def process_manual_sam(self, image_path, image_id, bbox, task_id,
         return {"status": "success", "task_id": task_id, "mask_url": mask_url}
     except Exception as e:
         logger.exception("[Manual SAM] FAILED: %s", str(e))
+        r.hset(f"task:{task_id}", mapping={"status": "failed", "message": str(e)})
+        r.expire(f"task:{task_id}", 3600)
+        _release_all_models()
+        return {"status": "failed", "task_id": task_id, "error": str(e)}
+
+
+# ==================== 人机协同负向提示修正 ====================
+@celery_app.task(name="process_correct_mask", bind=True, max_retries=1)
+def process_correct_mask(self, image_path, image_id, positive_boxes, negative_boxes,
+                         task_id, category_color=None, category_name=None):
+    """
+    人机协同：正向框+负向框 → SAM3 生成修正后的 Mask。
+    正向框保留目标区域，负向框排除错误区域。
+    """
+    from backend.models.sam_engine import SAMEngine
+    from backend.services.mask_utils import mask_to_transparent_png
+    from backend.services.storage import get_mask_path, get_mask_url
+
+    r = _get_redis()
+    try:
+        r.hset(f"task:{task_id}", mapping={"status": "processing", "mode": "correct"})
+        sam = SAMEngine.get_instance()
+        target_image = Image.open(image_path).convert("RGB")
+
+        corrected_mask = sam.generate_corrected_mask(
+            target_image,
+            positive_boxes=positive_boxes,
+            negative_boxes=negative_boxes,
+        )
+
+        if corrected_mask.sum() < 10:
+            r.hset(f"task:{task_id}", mapping={"status": "failed", "message": "Corrected mask too small"})
+            r.expire(f"task:{task_id}", 3600)
+            return {"status": "failed", "task_id": task_id}
+
+        if category_color and isinstance(category_color, str) and category_color.startswith('#'):
+            hex_c = category_color.lstrip('#')
+            color = (int(hex_c[0:2], 16), int(hex_c[2:4], 16), int(hex_c[4:6], 16))
+        else:
+            color = (0, 180, 255)
+
+        inst_idx = int(time.time() * 1000) % 10000
+        mask_path = get_mask_path(image_id, inst_idx)
+        mask_to_transparent_png(corrected_mask, mask_path, color=color, alpha=140)
+        mask_url = get_mask_url(image_id, inst_idx)
+
+        r.hset(f"task:{task_id}", mapping={
+            "status": "success", "mask_url": mask_url,
+            "message": "Corrected mask generated",
+        })
+        r.expire(f"task:{task_id}", 3600)
+        _release_all_models()
+        return {"status": "success", "task_id": task_id, "mask_url": mask_url}
+    except Exception as e:
+        logger.exception("[Correct Mask] FAILED: %s", str(e))
         r.hset(f"task:{task_id}", mapping={"status": "failed", "message": str(e)})
         r.expire(f"task:{task_id}", 3600)
         _release_all_models()

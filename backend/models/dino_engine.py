@@ -144,6 +144,95 @@ class DINOEngine:
         return feat_map, h, w
 
     @torch.no_grad()
+    def extract_multilayer_features(
+        self,
+        image: Image.Image,
+        layers: tuple[int, ...] = (9, 12),
+    ) -> dict[int, np.ndarray]:
+        """
+        提取指定层的全局平均特征（MRF融合器使用）。
+
+        Args:
+            image: PIL Image (RGB)
+            layers: 需要提取的层索引元组
+
+        Returns:
+            layer_features: {层索引: L2归一化特征向量 shape [C]}
+        """
+        if not self._warmed_up:
+            self.warmup()
+
+        tensor = self._preprocess(image)
+        max_layer = max(layers)
+        outputs = self.model.get_intermediate_layers(
+            tensor, n=max_layer, reshape=True, return_class_token=False, norm=True
+        )
+
+        result = {}
+        for layer_idx in layers:
+            idx = min(layer_idx - 1, len(outputs) - 1)
+            feat_map = outputs[idx]
+            feat_map = self._channel_attention(feat_map)
+            avg = feat_map.squeeze(0).mean(dim=(1, 2))
+            avg_np = avg.float().cpu().numpy()
+            avg_np = avg_np / (np.linalg.norm(avg_np) + 1e-8)
+            result[layer_idx] = avg_np
+
+        return result
+
+    @torch.no_grad()
+    def extract_multilayer_mask_features(
+        self,
+        image: Image.Image,
+        mask: np.ndarray,
+        layers: tuple[int, ...] = (9, 12),
+    ) -> dict[int, np.ndarray]:
+        """
+        提取指定层的Mask区域特征（MRF融合器使用）。
+
+        Args:
+            image: PIL Image (RGB)
+            mask: 布尔Mask [H, W]
+            layers: 需要提取的层索引元组
+
+        Returns:
+            layer_features: {层索引: L2归一化特征向量 shape [C]}
+        """
+        if not self._warmed_up:
+            self.warmup()
+
+        tensor = self._preprocess(image)
+        max_layer = max(layers)
+        outputs = self.model.get_intermediate_layers(
+            tensor, n=max_layer, reshape=True, return_class_token=False, norm=True
+        )
+
+        result = {}
+        for layer_idx in layers:
+            idx = min(layer_idx - 1, len(outputs) - 1)
+            feat_map = outputs[idx]
+            feat_map = self._channel_attention(feat_map)
+            _, c, h, w = feat_map.shape
+
+            mask_t = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+            mask_resized = torch.nn.functional.interpolate(
+                mask_t, size=(h, w), mode='bilinear', align_corners=False
+            )
+            mask_bool = (mask_resized.squeeze() > 0.5).to(self.device)
+
+            feat = feat_map.squeeze(0)
+            if mask_bool.sum() > 0:
+                avg = feat[:, mask_bool].mean(dim=1)
+            else:
+                avg = feat.mean(dim=(1, 2))
+
+            avg_np = avg.float().cpu().numpy()
+            avg_np = avg_np / (np.linalg.norm(avg_np) + 1e-8)
+            result[layer_idx] = avg_np
+
+        return result
+
+    @torch.no_grad()
     def _extract_features_multiscale(
         self,
         image: Image.Image,
@@ -395,6 +484,7 @@ class DINOEngine:
         """
         import cv2
         from scipy import ndimage
+        from backend.utils.threshold_utils import adaptive_change_threshold
 
         if ref_area_ratio is not None:
             threshold = self._compute_dynamic_threshold(ref_area_ratio)
@@ -403,6 +493,12 @@ class DINOEngine:
         img_w, img_h = image.size
 
         similarities = patch_feats @ template_feature
+
+        act_threshold = adaptive_change_threshold(
+            similarities, fallback_threshold=threshold,
+        )
+        threshold = max(threshold * 0.85, min(act_threshold, threshold * 1.1))
+
         sim_grid = similarities.reshape(h, w)
         match_patches = (sim_grid >= threshold)
 

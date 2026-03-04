@@ -71,7 +71,7 @@ export interface HistoryEntry {
 }
 
 export type ToolType = 'select' | 'pan' | 'zoom';
-export type ManualTool = 'rect_manual' | 'brush' | 'eraser' | null;
+export type ManualTool = 'rect_manual' | 'negative_box' | 'brush' | 'eraser' | null;
 export type AnnotationMode = 'mode1' | 'mode2' | 'mode3';
 export type TaskStatus =
   | 'idle' | 'pending' | 'processing' | 'success' | 'failed'
@@ -142,6 +142,8 @@ interface AppState {
   brushSize: number;
   undoStack: HistoryEntry[];
   redoStack: HistoryEntry[];
+  negativeBoxes: BBox[];
+  mode2TextHint: string;
 
   // Actions
   setCurrentMode: (mode: AnnotationMode) => void;
@@ -200,6 +202,9 @@ interface AppState {
   clearImageMasks: (imageId: string) => void;
   undo: () => void;
   redo: () => void;
+  addNegativeBox: (box: BBox) => void;
+  clearNegativeBoxes: () => void;
+  setMode2TextHint: (text: string) => void;
 }
 
 let _nextCatId = Date.now();
@@ -247,6 +252,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   brushSize: 10,
   undoStack: [],
   redoStack: [],
+  negativeBoxes: [],
+  mode2TextHint: '',
 
   // ===== 模式切换：清空所有模式特有状态 =====
   setCurrentMode: (mode) =>
@@ -456,4 +463,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         : existing.filter((u) => u !== entry.maskUrl);
       return { maskUrls: { ...s.maskUrls, [entry.imageId]: newMasks }, redoStack: s.redoStack.slice(0, -1), undoStack: [...s.undoStack, entry] };
     }),
+  addNegativeBox: (box) => set((s) => ({ negativeBoxes: [...s.negativeBoxes, box] })),
+  clearNegativeBoxes: () => set({ negativeBoxes: [] }),
+  setMode2TextHint: (text) => set({ mode2TextHint: text }),
 }));

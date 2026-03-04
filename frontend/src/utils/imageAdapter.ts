@@ -100,3 +100,36 @@ export function imageToCanvas(
     y: imgY * fit.scale + fit.offsetY,
   };
 }
+
+/**
+ * 批量坐标转换：画布坐标 bbox → 原图坐标 bbox
+ * 用于批量提交标注框的坐标映射
+ */
+export function canvasBboxToImage(
+  bbox: { x: number; y: number; width: number; height: number },
+  fit: FitResult,
+): { x: number; y: number; width: number; height: number } {
+  const tl = canvasToImage(bbox.x, bbox.y, fit);
+  const br = canvasToImage(bbox.x + bbox.width, bbox.y + bbox.height, fit);
+  return {
+    x: Math.max(0, tl.x),
+    y: Math.max(0, tl.y),
+    width: Math.max(0, br.x - tl.x),
+    height: Math.max(0, br.y - tl.y),
+  };
+}
+
+/**
+ * 约束坐标到有效图像范围内
+ */
+export function clampToImageBounds(
+  x: number,
+  y: number,
+  imgWidth: number,
+  imgHeight: number,
+): { x: number; y: number } {
+  return {
+    x: Math.max(0, Math.min(x, imgWidth)),
+    y: Math.max(0, Math.min(y, imgHeight)),
+  };
+}

@@ -138,6 +138,19 @@ export async function startManualSam(params: {
   return data;
 }
 
+// ===== 人机协同负向提示修正 =====
+export async function startCorrectMask(params: {
+  image_id: string;
+  image_path: string;
+  positive_boxes: [number, number, number, number][];
+  negative_boxes: [number, number, number, number][];
+  category_color?: string | null;
+  category_name?: string | null;
+}): Promise<{ task_id: string; status: string; mode: string }> {
+  const { data } = await api.post('/annotate/correct', params);
+  return data;
+}
+
 // ===== 任务控制 =====
 export async function pauseTask(taskId: string): Promise<void> { await api.post(`/tasks/${taskId}/pause`); }
 export async function resumeTask(taskId: string): Promise<void> { await api.post(`/tasks/${taskId}/resume`); }

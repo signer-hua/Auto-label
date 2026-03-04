@@ -141,11 +141,13 @@ MAX_REF_IMAGES = int(os.getenv("MAX_REF_IMAGES", "5"))
 DEFAULT_REF_WEIGHT = float(os.getenv("DEFAULT_REF_WEIGHT", "1.0"))
 AUX_REF_WEIGHT = float(os.getenv("AUX_REF_WEIGHT", "0.8"))
 
-# ==================== 置信度评分权重 ====================
-SCORE_WEIGHT_SIMILARITY = float(os.getenv("SCORE_W_SIM", "0.40"))
-SCORE_WEIGHT_MASK_COVERAGE = float(os.getenv("SCORE_W_COV", "0.35"))
-SCORE_WEIGHT_AREA = float(os.getenv("SCORE_W_AREA", "0.15"))
-SCORE_WEIGHT_DETECTION = float(os.getenv("SCORE_W_DET", "0.10"))
+# ==================== 置信度评分权重（v2 三维重构） ====================
+SCORE_WEIGHT_FEATURE_MATCH = float(os.getenv("SCORE_W_FEAT", "0.40"))
+SCORE_WEIGHT_MASK_QUALITY = float(os.getenv("SCORE_W_MASK", "0.40"))
+SCORE_WEIGHT_MORPHOLOGY = float(os.getenv("SCORE_W_MORPH", "0.20"))
+
+# ==================== 输入分辨率限制 ====================
+IMAGE_MAX_LONG_EDGE = int(os.getenv("IMAGE_MAX_LONG_EDGE", "1024"))
 
 # ==================== Redis 任务过期时间 ====================
 REDIS_TASK_EXPIRE = int(os.getenv("REDIS_TASK_EXPIRE", "86400"))  # 默认 24 小时

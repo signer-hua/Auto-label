@@ -8,7 +8,7 @@
 
 ```
 上传图片集 → 选择多参考图(2~5张) → 批量自动标注 → 按置信分数筛选
-    → 手动修正低分/错误标注(矩形→SAM3/撤销/重做) → 一键导出(COCO/VOC/YOLO)
+    → 手动修正低分/错误标注(矩形→SAM3/负向框选/撤销/重做) → 一键导出(COCO/VOC/YOLO)
 ```
 
 ## 三大标注模式
@@ -16,8 +16,72 @@
 | 模式 | 名称 | 链路 | 适用场景 |
 |------|------|------|----------|
 | 模式1 | 文本提示标注 | 文本 → Grounding DINO → SAM3 | 已知类别名称，一键全图标注 |
-| 模式2 | 框选批量标注 | 框选 → SAM3 → DINOv3 匹配 → 批量 SAM3 | 未知类别，标一个扩展到全部 |
-| 模式3 | 选实例跨图标注 | DINOv3 聚类 → 选实例 → DINOv3 匹配 → SAM3 | 视觉选择，跨图批量扩展 |
+| 模式2 | 框选批量标注 | 框选 → SAM3-PCS → MRF融合 → DINOv3 匹配 → 批量 SAM3 | 未知类别，标一个扩展到全部 |
+| 模式3 | 选实例跨图标注 | DINOv3 聚类 → 选实例 → MRF融合 → DINOv3 匹配 → SAM3 | 视觉选择，跨图批量扩展 |
+
+---
+
+## v7.0 核心精度提升 + 交互修复
+
+### SAM3-PCS 范式激活（模式2 精度核心）
+
+| 功能 | 说明 |
+|------|------|
+| **PCS 混合推理** | `generate_mask_from_exemplars` 方法：图像示例+坐标+文本提示联合推理 |
+| **多Mask并集融合** | 启用 `multimask_output`，高分候选取 union 提升完整性 |
+| **半精度推理** | `torch.autocast(float16)` 适配消费级 GPU |
+| **文本提示补充** | 模式2 新增文本提示输入框，辅助语义引导 |
+
+### MRF 多参考融合器
+
+| 功能 | 说明 |
+|------|------|
+| **通道加权 MLP** | 学习特征通道重要性，强化判别性通道 |
+| **自注意力模块** | `MultiheadAttention` 实现跨参考图特征交互 |
+| **低层/高层融合** | DINOv3 层9（低层语义）+ 层12（高层抽象）加权合并 |
+| **纯 PyTorch 实现** | 无新增依赖，适配半精度推理 |
+
+### ACT/ACF 动态阈值体系
+
+| 模块 | 说明 |
+|------|------|
+| **ACT 自适应阈值** | 高斯核密度估计（KDE）分析相似度分布，自动确定前景/背景分界点 |
+| **ACF 置信过滤** | 分位数动态过滤低置信结果，适应不同数据集分布 |
+| **纯数值计算** | 仅依赖 numpy/scipy，无新增依赖 |
+
+### 全模式显存优化
+
+| 优化项 | 说明 |
+|--------|------|
+| **输入分辨率限制** | 图片长边统一缩放至 1024px（OpenCV 等比缩放） |
+| **混合精度推理** | DINOv3 `.half()` 加载，SAM3 `autocast(float16)` |
+| **显存峰值 ≤ 5GB** | 适配 RTX 3060/3090 消费级 GPU |
+
+### 置信度评分重构（三维评分）
+
+| 维度 | 权重 | 说明 |
+|------|------|------|
+| 特征匹配度 | 40% | DINOv3 余弦相似度（ACT 动态阈值优化） |
+| Mask 合理性 | 40% | 覆盖率 + 面积合理性综合评估 |
+| 形态完整性 | 20% | OpenCV 计算孔洞率 + 连通域数量 |
+
+### 人机协同负向提示
+
+| 功能 | 说明 |
+|------|------|
+| **负向框选工具** | 红色框选排除错误区域，SAM3 重新生成修正 Mask |
+| **正向+负向组合** | 正向框保留目标，负向框排除噪声，精准修正 |
+| **实时更新** | 框选后立即调用后端修正，Mask 实时替换 |
+| **`/api/annotate/correct`** | 新增修正接口，传入正向框+负向框+标签 |
+
+### Celery 队列优先级分离
+
+| 队列 | 任务类型 | 说明 |
+|------|----------|------|
+| `high_priority` | 框选/预览/手动标注/负向修正 | 实时交互，低延迟 |
+| `low_priority` | 批量标注（模式1/2/3） | 后台处理，不阻塞交互 |
+
+---
 
 ## v6.0 手动标注类别 + 已标注图参考
 
@@ -52,8 +116,8 @@
 | **等比缩放** | 图片按宽/高中较大维度缩放适配画布（20px 内边距） |
 | **居中显示** | 缩放后图片在画布中水平/垂直居中 |
 | **不放大小图** | 小于画布的图片按原图尺寸居中 |
-| **切图重置** | 切换图片时自动重算缩放参数，Stage 缩放/位置还原 |
-| **坐标映射** | `imageAdapter.ts` 提供 `canvasToImage` / `imageToCanvas` 双向转换 |
+| **切图重置** | 切换图片时自动重算缩放参数，Stage 缩放/位置还原，临时图层清除 |
+| **坐标映射** | `imageAdapter.ts` 提供 `canvasToImage` / `imageToCanvas` / `canvasBboxToImage` 转换 |
 
 ### 缩放控制
 
@@ -64,8 +128,8 @@
 
 | 文件 | 功能 |
 |------|------|
-| `frontend/src/utils/categoryColorMap.ts` | 类别-颜色映射、查询、自动分配、hex/RGB 转换 |
-| `frontend/src/utils/imageAdapter.ts` | 图片等比缩放居中计算、画布↔原图坐标双向映射 |
+| `frontend/src/utils/categoryColorMap.ts` | 类别-颜色映射、查询、自动分配、同步、统一颜色获取 |
+| `frontend/src/utils/imageAdapter.ts` | 图片等比缩放居中计算、画布↔原图坐标双向映射、批量坐标转换 |
 
 ---
 
@@ -87,59 +151,53 @@
 | **模式1 类别绑定** | 文本标注可绑定全局类别，Mask 使用该类别颜色渲染 |
 | **颜色统一** | 同类别在所有模式下（自动/手动）使用统一颜色 |
 
-### 模式1 提示词增强
-
-| 功能 | 说明 |
-|------|------|
-| **多粒度提示词** | 支持短语（cat, dog）和完整句子（标注所有红色小轿车） |
-| **示例占位符** | 输入框显示多行示例，引导输入 |
-| **目标预览 API** | `POST /annotate/preview` 轻量检测，返回目标框（不生成 Mask） |
-
 ---
 
 ## v3.0 核心增强
 
-### 1. 多参考图增强标注（解决单参考图准确率低）
+### 1. 多参考图增强标注
 
 | 功能 | 说明 |
 |------|------|
 | **参考图库** | 右侧面板图钉按钮选择 2~5 张参考图 |
 | **权重设置** | 核心参考图 1.0、辅助 0.8，滑块可视化调节 |
-| **加权融合** | `fuse_multi_ref_features` 方法将多图特征归一化加权融合 |
+| **MRF 融合** | `MultiReferFuser` 低层/高层特征加权融合（v7 升级） |
 | **完全兼容** | 不选参考图库时自动回退到单参考图模式 |
 
-### 2. 置信度评分（解决标注质量不可控）
+### 2. 置信度评分（v7 三维重构）
 
 | 维度 | 权重 | 说明 |
 |------|------|------|
-| DINOv3 匹配相似度 | 40% | 特征匹配准确度 |
-| SAM3 Mask 覆盖率 | 35% | Mask 完整性 |
-| 面积合理性 | 15% | 过滤异常大/小目标 |
-| 漏检风险 | 10% | 无检测结果则扣分 |
+| 特征匹配度 | 40% | DINOv3 余弦相似度 + ACT 动态阈值 |
+| Mask 合理性 | 40% | 覆盖率 + 面积合理性综合 |
+| 形态完整性 | 20% | 孔洞率 + 连通域数量（OpenCV） |
 
 - 图片列表显示 0~100 分，颜色区分：≥85 绿色、70~85 黄色、<70 红色
 - 支持按分数筛选（高/中/低）和排序（升序/降序）
 - 悬浮分数 Tag 显示分项评分
 
-### 3. 手动标注兜底（解决自动标注误差）
+### 3. 手动标注兜底
 
 | 工具 | 说明 |
 |------|------|
-| **矩形框选** | 画矩形 → 触发 SAM3 生成精准 Mask，橙色显示 |
+| **矩形框选** | 画矩形 → 触发 SAM3 生成精准 Mask |
+| **负向框选** | 红色矩形 → 排除错误区域，修正 Mask |
 | **撤销/重做** | Ctrl+Z / Ctrl+Shift+Z，支持 10 步操作历史 |
 | **清空标注** | 一键清除当前图片所有 Mask |
-| **删除单个** | 后续可扩展点击删除单个 Mask |
 
-### 4. 算法优化（v2 → v3）
+### 4. 算法优化
 
 | 优化项 | 说明 |
 |--------|------|
 | 多尺度特征融合 | 0.8x/1.0x/1.2x 三尺度提取后加权平均 |
 | 背景抑制 | 裁剪到 mask bbox + 15% padding |
 | 通道方差注意力 | softmax 加权强化判别性通道 |
+| SAM3-PCS 范式 | 图像示例+坐标+文本提示混合推理 |
+| MRF 多参考融合 | 低层/高层特征自注意力交互融合 |
+| ACT 动态阈值 | KDE 自适应前景/背景分界 |
 | SAM3 多 Mask 并集 | 高分候选 Mask 取 union |
 | 形态学后处理 | 闭运算 + 高斯平滑 |
-| 动态余弦阈值 | 大目标 0.72、小目标 0.65 |
+| 输入分辨率限制 | 长边 ≤ 1024px（显存优化） |
 | 肘部法则聚类 | 自动 K=2~10 |
 | 图像预处理 | CLAHE + 高斯去噪 |
 
@@ -149,13 +207,18 @@
 ┌─────────────────┐     ┌──────────────┐     ┌──────────────┐
 │   React 前端     │────▶│   FastAPI    │────▶│    Redis     │
 │ Zustand + Konva  │◀────│  API 接收层  │◀────│  任务/评分   │
-│ 三模式+手动标注  │     │  (≤100ms)   │     │  状态存储    │
+│ 三模式+负向提示  │     │  (≤100ms)   │     │  状态存储    │
 └─────────────────┘     └──────────────┘     └──────┬───────┘
                                                     │
                                              ┌──────▼───────┐
                                              │ Celery Worker │
-                                             │ 多参考图融合  │
-                                             │ SAM3+DINOv3  │
+                                             │ ┌───────────┐ │
+                                             │ │high_priority│ │ ← 实时交互
+                                             │ │low_priority │ │ ← 批量标注
+                                             │ └───────────┘ │
+                                             │ SAM3-PCS     │
+                                             │ MRF + DINOv3 │
+                                             │ ACT/ACF 阈值 │
                                              │ +评分计算     │
                                              └──────────────┘
 ```
@@ -167,7 +230,7 @@
 | Python | >= 3.12 |
 | PyTorch | >= 2.7 |
 | CUDA | >= 12.6 |
-| GPU 显存 | >= 12GB |
+| GPU 显存 | >= 8GB（优化后） |
 | Node.js | >= 18 |
 | Redis | >= 5.0 |
 
@@ -179,10 +242,10 @@
 # 终端1: Redis
 redis-server
 
-# 终端2: Celery Worker
+# 终端2: Celery Worker（多队列）
 cd Auto-label
 $env:PYTHONPATH = (Get-Location).Path
-celery -A backend.worker worker --concurrency=1 --pool=solo -l info
+celery -A backend.worker worker --concurrency=1 --pool=solo -l info -Q high_priority,low_priority,celery
 
 # 终端3: FastAPI
 $env:PYTHONPATH = (Get-Location).Path
@@ -201,19 +264,27 @@ cd frontend && npm run dev
 1. **上传图片**：拖拽或点击上传
 2. **选择参考图**：星标设为主参考图，图钉加入参考图库（可选 2~5 张，滑块设权重）
 3. **选择模式**：文本/框选/实例
-4. **批量自动标注**：一键提交异步任务
-5. **查看评分**：图片列表显示置信分数（绿/黄/红）
+4. **批量自动标注**：一键提交异步任务（MRF 融合 + ACT 动态阈值）
+5. **查看评分**：图片列表显示置信分数（绿/黄/红，三维评分）
 6. **筛选低分图**：按分数排序或筛选，定位需修正的图片
-7. **手动修正**：切换到手动标注工具，矩形框选触发 SAM3 补充 Mask
-8. **撤销/重做**：Ctrl+Z / Ctrl+Shift+Z
-9. **导出**：COCO / VOC / YOLO 格式
+7. **手动修正**：矩形框选触发 SAM3 补充 Mask
+8. **负向修正**：红色负向框选排除错误区域
+9. **撤销/重做**：Ctrl+Z / Ctrl+Shift+Z
+10. **导出**：COCO / VOC / YOLO 格式
 
 ### 多参考图使用
 
 1. 在右侧图片列表点击 **图钉** 按钮将图片加入参考图库
 2. 参考图库面板显示在右下角，拖动滑块设置权重
 3. 切换到对应参考图，在画布上框选目标
-4. 点击「批量标注」，后端自动融合多张参考图特征
+4. 点击「批量标注」，后端自动通过 MRF 融合多张参考图特征
+
+### 负向提示修正
+
+1. 在手动标注区域点击 **负向框选** 按钮（红色图标）
+2. 在画布上用红色框选需要排除的区域
+3. 系统自动调用 SAM3 生成修正后的 Mask（排除负向区域）
+4. 可叠加多个负向框精细修正
 
 ## API 接口
 
@@ -222,10 +293,11 @@ cd frontend && npm run dev
 | `/api/upload` | POST | 上传图像 |
 | `/api/images` | GET | 获取图片列表 |
 | `/api/annotate/mode1` | POST | 文本提示标注 |
-| `/api/annotate/mode2` | POST | 框选标注（多参考图） |
+| `/api/annotate/mode2` | POST | 框选标注（MRF+PCS） |
 | `/api/annotate/mode3` | POST | 实例发现 |
-| `/api/annotate/mode3/select` | POST | 跨图标注（多参考图） |
+| `/api/annotate/mode3/select` | POST | 跨图标注（MRF融合） |
 | `/api/annotate/manual` | POST | 手动框选触发 SAM3 |
+| `/api/annotate/correct` | POST | 负向提示修正 Mask |
 | `/api/tasks/{id}` | GET | 查询状态（含评分） |
 | `/api/export/{id}/{fmt}` | GET | 导出标注 |
 
@@ -233,12 +305,55 @@ cd frontend && npm run dev
 
 | 模块 | 技术 |
 |------|------|
-| 后端 | FastAPI + Celery + Redis + PyTorch 2.7 |
+| 后端 | FastAPI + Celery（多队列） + Redis + PyTorch 2.7 |
 | 前端 | React 18 + TypeScript + Zustand + react-konva |
 | 检测 | Grounding DINO (transformers) |
-| 分割 | SAM3 (多 Mask 并集 + 形态学) |
-| 特征 | DINOv3 ViT-S/16 (多尺度 + 多参考融合) |
-| 评分 | 4 维度置信度量化（sim/cov/area/det） |
+| 分割 | SAM3（PCS范式 + 多Mask并集 + 形态学 + 负向提示） |
+| 特征 | DINOv3 ViT-S/16（多尺度 + MRF多层融合 + ACT动态阈值） |
+| 融合 | MRF（通道MLP + 自注意力 + 低层/高层特征融合） |
+| 评分 | 三维置信度量化（特征匹配40% + Mask合理性40% + 形态完整性20%） |
+| 显存 | 混合精度 + 分辨率限制（峰值 ≤ 5GB） |
+
+## 项目结构
+
+```
+Auto-label/
+├── backend/
+│   ├── main.py                      # FastAPI 应用入口
+│   ├── worker.py                    # Celery Worker（多队列）
+│   ├── api/
+│   │   └── routes.py                # API 路由（含 /correct 接口）
+│   ├── core/
+│   │   ├── config.py                # 全局配置
+│   │   └── exceptions.py            # 异常处理
+│   ├── models/
+│   │   ├── sam_engine.py            # SAM3 引擎（PCS + 负向提示）
+│   │   ├── dino_engine.py           # DINOv3 引擎（多层特征 + ACT）
+│   │   ├── grounding_dino_engine.py # Grounding DINO 引擎
+│   │   └── mrf_engine.py            # MRF 多参考融合器
+│   ├── services/
+│   │   ├── storage.py               # 文件存储
+│   │   ├── mask_utils.py            # Mask 工具
+│   │   └── image_utils.py           # 图像分辨率预处理
+│   ├── utils/
+│   │   ├── score_calculator.py      # 三维置信评分
+│   │   └── threshold_utils.py       # ACT/ACF 动态阈值
+│   └── libs/                        # SAM3/DINOv3 内置库
+├── frontend/
+│   ├── src/
+│   │   ├── api/index.ts             # API 接口（含 correct）
+│   │   ├── components/
+│   │   │   ├── Toolbar.tsx          # 工具栏（含负向框选+文本提示）
+│   │   │   ├── MainCanvas.tsx       # 画布（负向框+图层强绑定）
+│   │   │   ├── CategoryPanel.tsx    # 类别管理
+│   │   │   └── RightPanel.tsx       # 右侧面板
+│   │   ├── store/useAppStore.ts     # Zustand 状态
+│   │   └── utils/
+│   │       ├── imageAdapter.ts      # 坐标映射增强
+│   │       └── categoryColorMap.ts  # 颜色统一管理
+│   └── package.json
+└── README.md
+```
 
 ## License
 

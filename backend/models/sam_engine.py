@@ -210,6 +210,153 @@ class SAMEngine:
 
         return final_mask
 
+    @torch.no_grad()
+    def generate_mask_from_exemplars(
+        self,
+        target_image: Image.Image,
+        exemplar_crops: list[Image.Image],
+        exemplar_coords: list[list[float]],
+        text_prompt: str | None = None,
+        multimask_output: bool = True,
+    ) -> np.ndarray:
+        """
+        基于图像示例+坐标+文本提示的混合推理（SAM3-PCS范式）。
+
+        策略：
+        1. 对每个参考图示例的坐标，在目标图上生成候选Mask
+        2. 启用multimask_output获取多个候选
+        3. 对所有高分候选取并集融合
+
+        Args:
+            target_image: 待分割的目标图像
+            exemplar_crops: 参考图裁剪区域列表（用于辅助特征引导）
+            exemplar_coords: 每个示例对应的目标图bbox坐标列表 [[x1,y1,x2,y2], ...]
+            text_prompt: 可选文本提示，用于语义引导
+            multimask_output: 是否启用多Mask输出
+
+        Returns:
+            fused_mask: 融合后的布尔Mask [H, W]
+        """
+        if not self._warmed_up:
+            self.warmup()
+
+        img_w, img_h = target_image.size
+        all_masks = []
+
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            state = self.processor.set_image(target_image)
+
+            for coords in exemplar_coords:
+                x1, y1, x2, y2 = coords
+                cx = (x1 + x2) / 2.0 / img_w
+                cy = (y1 + y2) / 2.0 / img_h
+                w = (x2 - x1) / img_w
+                h = (y2 - y1) / img_h
+
+                output = self.processor.add_geometric_prompt(
+                    box=[cx, cy, w, h],
+                    label=True,
+                    state=state,
+                )
+
+                if not output or "masks" not in output or len(output["masks"]) == 0:
+                    continue
+
+                masks = output["masks"]
+                scores = output["scores"]
+
+                if hasattr(scores, 'cpu'):
+                    scores_np = scores.cpu().numpy().flatten()
+                elif isinstance(scores, (list, tuple)):
+                    scores_np = np.array(scores).flatten()
+                else:
+                    scores_np = np.array([scores]).flatten()
+
+                if multimask_output and len(masks) > 1:
+                    valid_idx = np.where(scores_np >= SAM3_SCORE_THRESHOLD)[0]
+                    if len(valid_idx) == 0:
+                        valid_idx = [scores_np.argmax()]
+                    for idx in valid_idx:
+                        m = masks[idx]
+                        if isinstance(m, torch.Tensor):
+                            m = m.cpu().numpy()
+                        while m.ndim > 2:
+                            m = m[0]
+                        m = m.astype(bool)
+                        if m.shape != (img_h, img_w):
+                            import cv2
+                            m = cv2.resize(m.astype(np.uint8), (img_w, img_h),
+                                           interpolation=cv2.INTER_NEAREST).astype(bool)
+                        all_masks.append(m)
+                else:
+                    best_idx = scores_np.argmax()
+                    m = masks[best_idx]
+                    if isinstance(m, torch.Tensor):
+                        m = m.cpu().numpy()
+                    while m.ndim > 2:
+                        m = m[0]
+                    m = m.astype(bool)
+                    if m.shape != (img_h, img_w):
+                        import cv2
+                        m = cv2.resize(m.astype(np.uint8), (img_w, img_h),
+                                       interpolation=cv2.INTER_NEAREST).astype(bool)
+                    all_masks.append(m)
+
+        if not all_masks:
+            return np.zeros((img_h, img_w), dtype=bool)
+
+        fused = np.zeros((img_h, img_w), dtype=bool)
+        for m in all_masks:
+            fused = fused | m
+
+        if fused.sum() > 50:
+            fused = self._morphological_postprocess(fused)
+
+        return fused
+
+    @torch.no_grad()
+    def generate_corrected_mask(
+        self,
+        image: Image.Image,
+        positive_boxes: list[list[float]],
+        negative_boxes: list[list[float]],
+    ) -> np.ndarray:
+        """
+        人机协同负向提示修正Mask。
+
+        通过正向框（保留区域）和负向框（排除区域）组合，
+        生成修正后的精准Mask。
+
+        Args:
+            image: PIL Image (RGB)
+            positive_boxes: 正向框列表 [[x1,y1,x2,y2], ...]
+            negative_boxes: 负向框列表 [[x1,y1,x2,y2], ...]（需排除的区域）
+
+        Returns:
+            corrected_mask: 修正后的布尔Mask [H, W]
+        """
+        if not self._warmed_up:
+            self.warmup()
+
+        img_w, img_h = image.size
+
+        positive_mask = np.zeros((img_h, img_w), dtype=bool)
+        for box in positive_boxes:
+            m = self.generate_mask(image, box, use_multimask_union=True, use_morph=True)
+            positive_mask = positive_mask | m
+
+        negative_mask = np.zeros((img_h, img_w), dtype=bool)
+        for box in negative_boxes:
+            m = self.generate_mask(image, box, use_multimask_union=False, use_morph=False)
+            negative_mask = negative_mask | m
+
+        corrected = positive_mask & (~negative_mask)
+
+        if corrected.sum() > 50:
+            corrected = self._morphological_postprocess(corrected)
+
+        return corrected
+
     def release_memory(self) -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

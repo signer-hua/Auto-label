@@ -293,6 +293,14 @@ const Toolbar: React.FC = () => {
                 <span style={{ width: 10, height: 10, borderRadius: 2, background: c.color, display: 'inline-block' }} />{c.name}</span>,
             }))}
           />
+          <div style={{ color: '#999', fontSize: 12 }}>文本提示补充（可选）</div>
+          <Input
+            value={useAppStore.getState().mode2TextHint}
+            onChange={(e) => useAppStore.getState().setMode2TextHint(e.target.value)}
+            placeholder="如：红色汽车、左侧物体"
+            size="small"
+            style={{ background: '#2a2a2a', borderColor: '#444', color: '#ddd', marginBottom: 4 }}
+          />
           <div style={{ color: '#999', fontSize: 12, marginBottom: 4 }}>画布工具</div>
           <Space wrap>
             {tools.map(t => (
@@ -406,15 +414,27 @@ const Toolbar: React.FC = () => {
             onClick={() => setManualTool(manualTool === 'rect_manual' ? null : 'rect_manual')}
             style={manualTool === 'rect_manual' ? { background: '#fa8c16', borderColor: '#fa8c16' } : {}} />
         </Tooltip>
+        <Tooltip title="负向框选（排除区域）">
+          <Button size="small" icon={<ClearOutlined />}
+            type={manualTool === 'negative_box' ? 'primary' : 'default'}
+            onClick={() => setManualTool(manualTool === 'negative_box' ? null : 'negative_box')}
+            style={manualTool === 'negative_box' ? { background: '#ff4d4f', borderColor: '#ff4d4f' } : {}} />
+        </Tooltip>
         <Tooltip title="撤销 Ctrl+Z"><Button size="small" icon={<UndoOutlined />} onClick={undo} /></Tooltip>
         <Tooltip title="重做 Ctrl+Shift+Z"><Button size="small" icon={<RedoOutlined />} onClick={redo} /></Tooltip>
         <Tooltip title="清空当前图标注">
           <Button size="small" danger icon={<ScissorOutlined />}
-            onClick={() => { if (displayImageId) clearImageMasks(displayImageId); }} />
+            onClick={() => {
+              if (displayImageId) clearImageMasks(displayImageId);
+              useAppStore.getState().clearNegativeBoxes();
+            }} />
         </Tooltip>
       </Space>
       {manualTool === 'rect_manual' && (
         <div style={{ color: '#fa8c16', fontSize: 11, marginTop: 2 }}>画布框选→自动 SAM3 生成 Mask</div>
+      )}
+      {manualTool === 'negative_box' && (
+        <div style={{ color: '#ff4d4f', fontSize: 11, marginTop: 2 }}>红色框选→排除该区域（负向提示）</div>
       )}
 
       {/* ===== 缩放控制 ===== */}

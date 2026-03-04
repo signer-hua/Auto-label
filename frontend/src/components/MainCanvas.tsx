@@ -12,7 +12,7 @@ import { Stage, Layer, Image as KonvaImage, Rect } from 'react-konva';
 import { UploadOutlined } from '@ant-design/icons';
 import useImage from 'use-image';
 import { useAppStore } from '../store/useAppStore';
-import { startManualSam, getTaskStatus } from '../api';
+import { startManualSam, startCorrectMask, getTaskStatus } from '../api';
 import { computeFit, canvasToImage, type FitResult } from '../utils/imageAdapter';
 
 function useLoadImage(url: string | null) {
@@ -26,6 +26,8 @@ const MainCanvas: React.FC = () => {
   const [containerSize, setContainerSize] = useState({ width: 800, height: 600 });
   const [manualDrawStart, setManualDrawStart] = useState<{ x: number; y: number } | null>(null);
   const [manualRect, setManualRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [negDrawStart, setNegDrawStart] = useState<{ x: number; y: number } | null>(null);
+  const [negRect, setNegRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
 
   const {
     images, selectedImageId, viewingImageId,
@@ -38,6 +40,7 @@ const MainCanvas: React.FC = () => {
     setBBox, setIsDrawing, toggleInstanceId,
     setStageScale, setStagePosition, setImageFit,
     addMaskToImage, undo, redo,
+    negativeBoxes, addNegativeBox, clearNegativeBoxes,
   } = useAppStore();
 
   const displayImageId = viewingImageId || selectedImageId;
@@ -89,11 +92,16 @@ const MainCanvas: React.FC = () => {
     setImageFit(imageFit.scale, imageFit.offsetX, imageFit.offsetY);
   }, [imageFit.scale, imageFit.offsetX, imageFit.offsetY, setImageFit]);
 
-  // 切图时重置 Stage 缩放和位置
+  // 切图时重置 Stage 缩放和位置，清除临时图层状态
   useEffect(() => {
     setStageScale(1);
     setStagePosition({ x: 0, y: 0 });
-  }, [displayImageId, setStageScale, setStagePosition]);
+    setManualRect(null);
+    setManualDrawStart(null);
+    setNegRect(null);
+    setNegDrawStart(null);
+    clearNegativeBoxes();
+  }, [displayImageId, setStageScale, setStagePosition, clearNegativeBoxes]);
 
   // Ctrl+Z / Ctrl+Shift+Z 快捷键
   useEffect(() => {
@@ -109,6 +117,7 @@ const MainCanvas: React.FC = () => {
 
   const canDraw = currentMode === 'mode2' && activeTool === 'select';
   const canManualDraw = manualTool === 'rect_manual';
+  const canNegativeDraw = manualTool === 'negative_box';
 
   const handleMouseDown = useCallback((e: any) => {
     const stage = stageRef.current;
@@ -116,6 +125,11 @@ const MainCanvas: React.FC = () => {
     const pos = stage.getRelativePointerPosition();
     if (!pos) return;
 
+    if (canNegativeDraw) {
+      setNegDrawStart({ x: pos.x, y: pos.y });
+      setNegRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
+      return;
+    }
     if (canManualDraw) {
       setManualDrawStart({ x: pos.x, y: pos.y });
       setManualRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
@@ -125,7 +139,7 @@ const MainCanvas: React.FC = () => {
     drawStart.current = { x: pos.x, y: pos.y };
     setBBox({ x: pos.x, y: pos.y, width: 0, height: 0 });
     setIsDrawing(true);
-  }, [canDraw, canManualDraw, setBBox, setIsDrawing]);
+  }, [canDraw, canManualDraw, canNegativeDraw, setBBox, setIsDrawing]);
 
   const handleMouseMove = useCallback(() => {
     const stage = stageRef.current;
@@ -133,6 +147,13 @@ const MainCanvas: React.FC = () => {
     const pos = stage.getRelativePointerPosition();
     if (!pos) return;
 
+    if (negDrawStart && canNegativeDraw) {
+      setNegRect({
+        x: Math.min(negDrawStart.x, pos.x), y: Math.min(negDrawStart.y, pos.y),
+        w: Math.abs(pos.x - negDrawStart.x), h: Math.abs(pos.y - negDrawStart.y),
+      });
+      return;
+    }
     if (manualDrawStart && canManualDraw) {
       setManualRect({
         x: Math.min(manualDrawStart.x, pos.x), y: Math.min(manualDrawStart.y, pos.y),
@@ -145,17 +166,63 @@ const MainCanvas: React.FC = () => {
       x: Math.min(drawStart.current.x, pos.x), y: Math.min(drawStart.current.y, pos.y),
       width: Math.abs(pos.x - drawStart.current.x), height: Math.abs(pos.y - drawStart.current.y),
     });
-  }, [isDrawing, canDraw, canManualDraw, manualDrawStart, setBBox]);
+  }, [isDrawing, canDraw, canManualDraw, canNegativeDraw, manualDrawStart, negDrawStart, setBBox]);
 
   const handleMouseUp = useCallback(async () => {
+    // 负向框选：记录负向框并立即触发修正
+    if (negDrawStart && canNegativeDraw && negRect && negRect.w > 5 && negRect.h > 5 && displayImage) {
+      setNegDrawStart(null);
+      const tl = canvasToImage(negRect.x, negRect.y, imageFit);
+      const br = canvasToImage(negRect.x + negRect.w, negRect.y + negRect.h, imageFit);
+      addNegativeBox({ x: negRect.x, y: negRect.y, width: negRect.w, height: negRect.h });
+
+      const activeCat = activeCategoryId ? categories.find(c => c.id === activeCategoryId) : null;
+      const currentMasks = useAppStore.getState().maskUrls[displayImage.id] || [];
+      if (currentMasks.length > 0) {
+        try {
+          const posBoxes: [number, number, number, number][] = [];
+          const imgFitState = imageFit;
+          const fullTl = canvasToImage(imgFitState.offsetX, imgFitState.offsetY, imgFitState);
+          const fullBr = canvasToImage(imgFitState.offsetX + imgFitState.displayWidth, imgFitState.offsetY + imgFitState.displayHeight, imgFitState);
+          posBoxes.push([Math.max(0, fullTl.x), Math.max(0, fullTl.y), fullBr.x, fullBr.y]);
+
+          const allNegBoxes: [number, number, number, number][] = useAppStore.getState().negativeBoxes.map(nb => {
+            const nbTl = canvasToImage(nb.x, nb.y, imgFitState);
+            const nbBr = canvasToImage(nb.x + nb.width, nb.y + nb.height, imgFitState);
+            return [nbTl.x, nbTl.y, nbBr.x, nbBr.y] as [number, number, number, number];
+          });
+
+          const result = await startCorrectMask({
+            image_id: displayImage.id, image_path: displayImage.path,
+            positive_boxes: posBoxes,
+            negative_boxes: allNegBoxes,
+            category_color: activeCat?.color || null,
+            category_name: activeCat?.name || null,
+          });
+          const pollCorrect = setInterval(async () => {
+            const res = await getTaskStatus(result.task_id);
+            if (res.status === 'success' && res.mask_url) {
+              clearInterval(pollCorrect);
+              addMaskToImage(displayImage.id, res.mask_url);
+              setNegRect(null);
+            } else if (res.status === 'failed') {
+              clearInterval(pollCorrect); setNegRect(null);
+            }
+          }, 500);
+        } catch { setNegRect(null); }
+      } else {
+        setNegRect(null);
+      }
+      return;
+    }
+    setNegDrawStart(null);
+
     // 手动标注矩形：画布坐标 → 原图坐标 → 发送后端
     if (manualDrawStart && canManualDraw && manualRect && manualRect.w > 10 && manualRect.h > 10 && displayImage) {
       setManualDrawStart(null);
-      // 转为原图坐标
       const tl = canvasToImage(manualRect.x, manualRect.y, imageFit);
       const br = canvasToImage(manualRect.x + manualRect.w, manualRect.y + manualRect.h, imageFit);
       const bboxCoords: [number, number, number, number] = [tl.x, tl.y, br.x, br.y];
-      // 传入当前选中类别的颜色，使手动标注 Mask 与自动标注同类别颜色一致
       const activeCat = activeCategoryId ? categories.find(c => c.id === activeCategoryId) : null;
       try {
         const result = await startManualSam({
@@ -178,7 +245,7 @@ const MainCanvas: React.FC = () => {
     if (!isDrawing) return;
     setIsDrawing(false);
     drawStart.current = null;
-  }, [isDrawing, canManualDraw, manualDrawStart, manualRect, displayImage, imageFit, setIsDrawing, addMaskToImage]);
+  }, [isDrawing, canManualDraw, canNegativeDraw, manualDrawStart, manualRect, negDrawStart, negRect, displayImage, imageFit, setIsDrawing, addMaskToImage, addNegativeBox, activeCategoryId, categories]);
 
   const handleWheel = useCallback((e: any) => {
     e.evt.preventDefault();
@@ -213,13 +280,14 @@ const MainCanvas: React.FC = () => {
   }, [toggleInstanceId]);
 
   const getCursor = () => {
+    if (canNegativeDraw) return 'not-allowed';
     if (canManualDraw) return 'crosshair';
     if (currentMode === 'mode2' && activeTool === 'select') return 'crosshair';
     if (activeTool === 'pan' || currentMode !== 'mode2') return 'grab';
     return 'zoom-in';
   };
 
-  const isDraggable = !canManualDraw && (currentMode !== 'mode2' || activeTool === 'pan');
+  const isDraggable = !canManualDraw && !canNegativeDraw && (currentMode !== 'mode2' || activeTool === 'pan');
 
   const modeColors: Record<string, string> = { mode1: 'rgba(0,120,255,0.8)', mode2: 'rgba(255,77,79,0.8)', mode3: 'rgba(0,200,80,0.8)' };
   const modeLabels: Record<string, string> = { mode1: '模式1：文本标注', mode2: '模式2：框选标注', mode3: '模式3：实例标注' };
@@ -291,6 +359,26 @@ const MainCanvas: React.FC = () => {
             <Rect x={manualRect.x} y={manualRect.y} width={manualRect.w} height={manualRect.h}
               stroke="#ffa500" strokeWidth={2 / stageScale}
               dash={[4 / stageScale, 2 / stageScale]} fill="rgba(255,165,0,0.1)" />
+          </Layer>
+        )}
+
+        {/* 负向框选预览（红色） */}
+        {negRect && negRect.w > 0 && negRect.h > 0 && (
+          <Layer>
+            <Rect x={negRect.x} y={negRect.y} width={negRect.w} height={negRect.h}
+              stroke="#ff4d4f" strokeWidth={2 / stageScale}
+              dash={[3 / stageScale, 3 / stageScale]} fill="rgba(255,77,79,0.15)" />
+          </Layer>
+        )}
+
+        {/* 已确认的负向框（红色虚线） */}
+        {negativeBoxes.length > 0 && (
+          <Layer>
+            {negativeBoxes.map((nb, idx) => (
+              <Rect key={`neg-${idx}`} x={nb.x} y={nb.y} width={nb.width} height={nb.height}
+                stroke="#ff4d4f" strokeWidth={1.5 / stageScale}
+                dash={[4 / stageScale, 2 / stageScale]} fill="rgba(255,77,79,0.08)" />
+            ))}
           </Layer>
         )}
       </Stage>

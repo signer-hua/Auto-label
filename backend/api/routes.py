@@ -118,6 +118,16 @@ class ManualSamRequest(BaseModel):
     category_name: str | None = Field(None, description="类别名称")
 
 
+class CorrectMaskRequest(BaseModel):
+    """人机协同负向提示修正 Mask 请求"""
+    image_id: str = Field(..., description="图片 ID")
+    image_path: str = Field(..., description="图片路径")
+    positive_boxes: list[list[float]] = Field(..., description="正向框列表 [[x1,y1,x2,y2], ...]")
+    negative_boxes: list[list[float]] = Field(default=[], description="负向框列表 [[x1,y1,x2,y2], ...]")
+    category_color: str | None = Field(None, description="类别颜色 hex")
+    category_name: str | None = Field(None, description="类别名称")
+
+
 class TaskStatusResponse(BaseModel):
     """任务状态响应"""
     task_id: str
@@ -568,3 +578,37 @@ async def annotate_manual(req: ManualSamRequest):
     )
     logger.info("Manual SAM task: %s (image=%s)", task_id, req.image_id)
     return {"task_id": task_id, "status": "pending", "mode": "manual"}
+
+
+# ==================== 人机协同负向提示修正 ====================
+
+@router.post("/annotate/correct")
+async def annotate_correct(req: CorrectMaskRequest):
+    """
+    人机协同负向提示：正向框+负向框 → SAM3 生成修正后的 Mask。
+    用户通过红色负向框排除错误区域，蓝色正向框保留目标区域。
+    """
+    if not req.positive_boxes:
+        raise HTTPException(status_code=400, detail="At least one positive box is required")
+
+    task_id = uuid.uuid4().hex
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending", "progress": 0, "total": 1,
+        "message": "Generating corrected mask...", "mode": "correct",
+    })
+    r.expire(f"task:{task_id}", 3600)
+
+    from backend.worker import process_correct_mask
+    process_correct_mask.delay(
+        image_path=req.image_path,
+        image_id=req.image_id,
+        positive_boxes=req.positive_boxes,
+        negative_boxes=req.negative_boxes,
+        task_id=task_id,
+        category_color=req.category_color,
+        category_name=req.category_name,
+    )
+    logger.info("Correct mask task: %s (image=%s, +%d -%d boxes)",
+                task_id, req.image_id, len(req.positive_boxes), len(req.negative_boxes))
+    return {"task_id": task_id, "status": "pending", "mode": "correct"}

@@ -69,9 +69,65 @@ export function getNextAvailableColor(usedColors: string[]): string {
   for (const c of PRESET_COLORS) {
     if (!usedSet.has(c.toUpperCase())) return c;
   }
-  // 所有预设色用完，随机生成
   const r = Math.floor(Math.random() * 200) + 30;
   const g = Math.floor(Math.random() * 200) + 30;
   const b = Math.floor(Math.random() * 200) + 30;
   return rgbToHex(r, g, b);
+}
+
+/** 根据类别名称查找类别（模糊匹配） */
+export function findCategoryByName(categories: CategoryDef[], name: string): CategoryDef | undefined {
+  const lower = name.toLowerCase().trim();
+  return categories.find(c => c.name.toLowerCase().trim() === lower);
+}
+
+/**
+ * 确保自动/手动标注同类别颜色统一。
+ * 根据类别名称或ID返回一致的颜色值。
+ */
+export function getUnifiedColor(
+  categories: CategoryDef[],
+  categoryId?: string,
+  categoryName?: string,
+): string {
+  if (categoryId) {
+    const cat = categories.find(c => c.id === categoryId);
+    if (cat) return cat.color;
+  }
+  if (categoryName) {
+    const cat = findCategoryByName(categories, categoryName);
+    if (cat) return cat.color;
+  }
+  return '#888888';
+}
+
+/**
+ * 同步类别列表到 localStorage 并返回更新后的列表。
+ * 如果后端返回了新的类别名称，自动添加到本地类别列表。
+ */
+export function syncCategoriesFromAnnotation(
+  existingCategories: CategoryDef[],
+  annotationCategories: Array<{ name: string; color?: string }>,
+): CategoryDef[] {
+  const updated = [...existingCategories];
+  let changed = false;
+
+  for (const annCat of annotationCategories) {
+    const existing = findCategoryByName(updated, annCat.name);
+    if (!existing) {
+      const usedColors = updated.map(c => c.color);
+      const color = annCat.color || getNextAvailableColor(usedColors);
+      updated.push({
+        id: `cat_sync_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name: annCat.name,
+        color,
+      });
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    saveCategoriesToStorage(updated);
+  }
+  return updated;
 }

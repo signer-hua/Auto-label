@@ -1,37 +1,31 @@
 """
-置信度评分模块
+置信度评分模块（v2 重构版）
 为每张标注图片生成 0~100 分综合置信分数。
 
-评分维度及权重：
-    - DINOv3 特征匹配相似度均值（40%）
-    - SAM3 Mask 与目标外接矩形的覆盖占比均值（35%）
-    - 目标区域面积合理性（15%，过滤过小/过大异常目标）
-    - 漏检风险反向计分（10%，无漏检得满分）
-
-使用方式：
-    在 worker.py 标注循环中收集每张图的评分原始数据，
-    标注完成后调用 compute_image_score 计算综合分数。
+评分维度及权重（三维重构）：
+    - 特征匹配度（40%）：DINOv3 余弦相似度
+    - Mask 合理性（40%）：覆盖率 + 面积合理性综合
+    - 形态完整性（20%）：孔洞率 + 连通域数量（OpenCV 计算）
 """
 import numpy as np
 import logging
 
 logger = logging.getLogger(__name__)
 
-WEIGHT_SIMILARITY = 0.40
-WEIGHT_MASK_COVERAGE = 0.35
-WEIGHT_AREA = 0.15
-WEIGHT_DETECTION = 0.10
+WEIGHT_FEATURE_MATCH = 0.40
+WEIGHT_MASK_QUALITY = 0.40
+WEIGHT_MORPHOLOGY = 0.20
 
-AREA_RATIO_MIN = 0.001   # 面积占比下限（<此值视为过小）
-AREA_RATIO_MAX = 0.50    # 面积占比上限（>此值视为过大）
+AREA_RATIO_MIN = 0.001
+AREA_RATIO_MAX = 0.50
 AREA_RATIO_IDEAL_MIN = 0.005
 AREA_RATIO_IDEAL_MAX = 0.30
 
 
-def _similarity_score(similarities: list[float]) -> float:
+def _feature_match_score(similarities: list[float]) -> float:
     """
-    特征匹配相似度评分。
-    相似度越高 → 匹配越准确。将 [0.5, 1.0] 映射到 [0, 100]。
+    特征匹配度评分。
+    将相似度 [0.5, 1.0] 映射到 [0, 100]。
     """
     if not similarities:
         return 0.0
@@ -40,101 +34,119 @@ def _similarity_score(similarities: list[float]) -> float:
     return round(score, 1)
 
 
-def _mask_coverage_score(coverages: list[float]) -> float:
+def _mask_quality_score(
+    coverages: list[float],
+    area_ratios: list[float],
+) -> float:
     """
-    Mask 覆盖率评分。
-    coverage = mask_area / bbox_area，理想值接近 0.6~0.9。
-    过低说明 Mask 不完整，过高可能包含背景。
-    """
-    if not coverages:
-        return 0.0
-    avg = float(np.mean(coverages))
-    if avg >= 0.6 and avg <= 0.9:
-        score = 100.0
-    elif avg >= 0.4:
-        score = 60.0 + (avg - 0.4) / 0.2 * 40.0
-    elif avg > 0.9:
-        score = max(50.0, 100.0 - (avg - 0.9) / 0.1 * 50.0)
-    else:
-        score = max(0.0, avg / 0.4 * 60.0)
-    return round(min(100.0, max(0.0, score)), 1)
+    Mask 合理性评分（覆盖率 + 面积合理性综合）。
 
-
-def _area_score(area_ratios: list[float]) -> float:
+    覆盖率 coverage = mask_area / bbox_area，理想值 0.6~0.9
+    面积合理性：过小或过大均扣分
     """
-    目标面积合理性评分。
-    过小（< AREA_RATIO_MIN）或过大（> AREA_RATIO_MAX）扣分。
-    """
-    if not area_ratios:
-        return 50.0
-    scores = []
-    for ratio in area_ratios:
-        if AREA_RATIO_IDEAL_MIN <= ratio <= AREA_RATIO_IDEAL_MAX:
-            scores.append(100.0)
-        elif ratio < AREA_RATIO_MIN:
-            scores.append(20.0)
-        elif ratio > AREA_RATIO_MAX:
-            scores.append(30.0)
-        elif ratio < AREA_RATIO_IDEAL_MIN:
-            t = (ratio - AREA_RATIO_MIN) / (AREA_RATIO_IDEAL_MIN - AREA_RATIO_MIN)
-            scores.append(20.0 + t * 80.0)
+    cov_score = 0.0
+    if coverages:
+        avg_cov = float(np.mean(coverages))
+        if 0.6 <= avg_cov <= 0.9:
+            cov_score = 100.0
+        elif avg_cov >= 0.4:
+            cov_score = 60.0 + (avg_cov - 0.4) / 0.2 * 40.0
+        elif avg_cov > 0.9:
+            cov_score = max(50.0, 100.0 - (avg_cov - 0.9) / 0.1 * 50.0)
         else:
-            t = (ratio - AREA_RATIO_IDEAL_MAX) / (AREA_RATIO_MAX - AREA_RATIO_IDEAL_MAX)
-            scores.append(100.0 - t * 70.0)
+            cov_score = max(0.0, avg_cov / 0.4 * 60.0)
+
+    area_score = 50.0
+    if area_ratios:
+        scores = []
+        for ratio in area_ratios:
+            if AREA_RATIO_IDEAL_MIN <= ratio <= AREA_RATIO_IDEAL_MAX:
+                scores.append(100.0)
+            elif ratio < AREA_RATIO_MIN:
+                scores.append(20.0)
+            elif ratio > AREA_RATIO_MAX:
+                scores.append(30.0)
+            elif ratio < AREA_RATIO_IDEAL_MIN:
+                t = (ratio - AREA_RATIO_MIN) / (AREA_RATIO_IDEAL_MIN - AREA_RATIO_MIN)
+                scores.append(20.0 + t * 80.0)
+            else:
+                t = (ratio - AREA_RATIO_IDEAL_MAX) / (AREA_RATIO_MAX - AREA_RATIO_IDEAL_MAX)
+                scores.append(100.0 - t * 70.0)
+        area_score = float(np.mean(scores))
+
+    combined = cov_score * 0.6 + area_score * 0.4
+    return round(min(100.0, max(0.0, combined)), 1)
+
+
+def _morphology_score(masks: list[np.ndarray] | None = None) -> float:
+    """
+    形态完整性评分。
+    通过 OpenCV 计算孔洞率和连通域数量评估 Mask 形态质量。
+
+    评分规则：
+    - 孔洞率 < 5%：满分
+    - 连通域数量 == 1：满分
+    - 孔洞率/连通域越多，扣分越重
+    """
+    if not masks:
+        return 70.0
+
+    import cv2
+
+    scores = []
+    for mask in masks:
+        if not isinstance(mask, np.ndarray) or mask.sum() < 10:
+            scores.append(50.0)
+            continue
+
+        mask_uint8 = mask.astype(np.uint8) * 255
+
+        num_labels, _ = cv2.connectedComponents(mask_uint8)
+        n_components = max(1, num_labels - 1)
+
+        filled = cv2.morphologyEx(
+            mask_uint8,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)),
+            iterations=3,
+        )
+        holes = (filled > 0) & (mask_uint8 == 0)
+        hole_ratio = float(holes.sum()) / max(1, float(mask.sum()))
+
+        hole_score = 100.0 if hole_ratio < 0.05 else max(30.0, 100.0 - hole_ratio * 500)
+        conn_score = 100.0 if n_components == 1 else max(30.0, 100.0 - (n_components - 1) * 20)
+
+        scores.append(hole_score * 0.5 + conn_score * 0.5)
+
     return round(float(np.mean(scores)), 1)
 
 
-def _detection_score(detected_count: int, expected_count: int | None = None) -> float:
-    """
-    检测完整性评分（漏检风险反向计分）。
-    检测到目标 → 满分；未检测到 → 0 分。
-    若已知预期数量，按检出比例计分。
-    """
-    if detected_count <= 0:
-        return 0.0
-    if expected_count is None or expected_count <= 0:
-        return 100.0
-    ratio = min(1.0, detected_count / expected_count)
-    return round(ratio * 100.0, 1)
-
-
-def compute_image_score(
+def compute_comprehensive_score(
     similarity_values: list[float],
     mask_coverages: list[float],
     area_ratios: list[float],
-    detected_count: int,
-    expected_count: int | None = None,
+    masks: list[np.ndarray] | None = None,
 ) -> dict:
     """
-    计算单张图片的综合置信分数（0~100）。
+    计算单张图片的综合置信分数（v2 三维重构版，0~100）。
 
     Args:
         similarity_values: 每个检测目标的 DINOv3 余弦相似度
-        mask_coverages: 每个目标的 Mask覆盖率 = mask_area / bbox_area
-        area_ratios: 每个目标的面积占比 = mask_area / image_area
-        detected_count: 本图检测到的目标数量
-        expected_count: 预期目标数量（可选，用于漏检评估）
+        mask_coverages: 每个目标的 Mask 覆盖率
+        area_ratios: 每个目标的面积占比
+        masks: 每个目标的 Mask 数组列表（可选，用于形态评分）
 
     Returns:
-        {
-            "total": float,         # 综合分 0~100
-            "similarity": float,    # 匹配度分项
-            "mask_coverage": float, # Mask完整性分项
-            "area": float,          # 面积合理性分项
-            "detection": float,     # 检测完整性分项
-            "level": str,           # "high" / "medium" / "low"
-        }
+        综合评分字典
     """
-    sim = _similarity_score(similarity_values)
-    cov = _mask_coverage_score(mask_coverages)
-    area = _area_score(area_ratios)
-    det = _detection_score(detected_count, expected_count)
+    feat = _feature_match_score(similarity_values)
+    quality = _mask_quality_score(mask_coverages, area_ratios)
+    morph = _morphology_score(masks)
 
     total = round(
-        sim * WEIGHT_SIMILARITY
-        + cov * WEIGHT_MASK_COVERAGE
-        + area * WEIGHT_AREA
-        + det * WEIGHT_DETECTION,
+        feat * WEIGHT_FEATURE_MATCH
+        + quality * WEIGHT_MASK_QUALITY
+        + morph * WEIGHT_MORPHOLOGY,
         1,
     )
 
@@ -147,12 +159,34 @@ def compute_image_score(
 
     return {
         "total": total,
-        "similarity": sim,
-        "mask_coverage": cov,
-        "area": area,
-        "detection": det,
+        "feature_match": feat,
+        "mask_quality": quality,
+        "morphology": morph,
+        "similarity": feat,
+        "mask_coverage": quality,
+        "area": round(quality * 0.4 / 0.4, 1) if area_ratios else 50.0,
+        "detection": 100.0 if similarity_values else 0.0,
         "level": level,
     }
+
+
+def compute_image_score(
+    similarity_values: list[float],
+    mask_coverages: list[float],
+    area_ratios: list[float],
+    detected_count: int,
+    expected_count: int | None = None,
+) -> dict:
+    """
+    兼容原有调用的评分接口（向后兼容）。
+    内部调用重构后的 compute_comprehensive_score。
+    """
+    return compute_comprehensive_score(
+        similarity_values=similarity_values,
+        mask_coverages=mask_coverages,
+        area_ratios=area_ratios,
+        masks=None,
+    )
 
 
 def compute_mask_coverage(mask_area: float, bbox: list[float]) -> float:
