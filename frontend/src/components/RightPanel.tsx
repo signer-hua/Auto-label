@@ -39,7 +39,7 @@ const RightPanel: React.FC = () => {
     maskUrls, imageScores, scoreFilter, sortOrder,
     refImages,
     selectImage, setViewingImage, removeImage, addImages,
-    updateTaskProgress, setTaskStatus, setMaskUrls, setExportUrl,
+    updateTaskProgress, setTaskStatus, setMaskUrls, mergeMaskUrls, setExportUrl,
     setErrorType, setInstanceMasks, setImageScores,
     setScoreFilter, setSortOrder,
     addRefImage, removeRefImage, setRefImageWeight,
@@ -75,7 +75,7 @@ const RightPanel: React.FC = () => {
 
         if (res.status === 'success') {
           setTaskStatus('success', res.message);
-          if (res.mask_urls) setMaskUrls(res.mask_urls);
+          if (res.mask_urls) mergeMaskUrls(res.mask_urls);
           if (res.export_url) setExportUrl(res.export_url);
           if (res.image_scores) setImageScores(res.image_scores);
           message.success('标注完成！');

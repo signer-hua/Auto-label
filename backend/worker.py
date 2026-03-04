@@ -580,6 +580,7 @@ def process_instance_annotation(
     self, ref_image_path, ref_image_id, selected_instance_id,
     target_image_paths, target_image_ids, task_id,
     categories=None, ref_images=None, category_color=None,
+    manual_mask_urls=None,
 ):
     from backend.models.sam_engine import SAMEngine
     from backend.models.dino_engine import DINOEngine
@@ -679,6 +680,42 @@ def process_instance_annotation(
 
         if not category_templates:
             raise ValueError("No valid category templates")
+
+        # 手动 Mask 特征融合：将参考图手动标注纳入跨图参考特征库
+        if manual_mask_urls and len(manual_mask_urls) > 0:
+            r.hset(f"task:{task_id}", "message", "Fusing manual annotation features...")
+            from backend.core.config import MASK_DIR
+            manual_feats = []
+            for mask_url in manual_mask_urls:
+                try:
+                    mask_filename = mask_url.split('/')[-1]
+                    mask_path = MASK_DIR / mask_filename
+                    if not mask_path.exists():
+                        continue
+                    mask_img = Image.open(mask_path).convert("RGBA")
+                    mask_np = np.array(mask_img)
+                    binary_mask = mask_np[:, :, 3] > 50
+                    if binary_mask.sum() < 50:
+                        continue
+                    ref_h, ref_w = ref_image.size[1], ref_image.size[0]
+                    if binary_mask.shape != (ref_h, ref_w):
+                        import cv2
+                        binary_mask = cv2.resize(
+                            binary_mask.astype(np.uint8), (ref_w, ref_h),
+                            interpolation=cv2.INTER_NEAREST
+                        ).astype(bool)
+                    feat = dino.extract_mask_feature(ref_pp, binary_mask)
+                    manual_feats.append(feat)
+                except Exception as mf_err:
+                    logger.warning("[Mode3] Manual mask feature extraction failed: %s", str(mf_err))
+
+            if manual_feats:
+                for ct in category_templates:
+                    auto_feat = ct["template"]
+                    all_feats = [auto_feat] + manual_feats
+                    all_weights = [0.7] + [0.3 / len(manual_feats)] * len(manual_feats)
+                    ct["template"] = dino.fuse_multi_ref_features(all_feats, all_weights)
+                logger.info("[Mode3] Fused %d manual mask features into reference templates", len(manual_feats))
 
         mask_urls = {}
         coco_annotations = []

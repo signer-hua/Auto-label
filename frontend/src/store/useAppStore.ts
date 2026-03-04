@@ -172,6 +172,8 @@ interface AppState {
   setTaskStatus: (status: TaskStatus, message?: string) => void;
   setErrorType: (errorType: string | null) => void;
   setMaskUrls: (urls: Record<string, string[]>) => void;
+  /** 合并 Mask URLs（保留已有的参考图手动标注，仅追加新结果） */
+  mergeMaskUrls: (urls: Record<string, string[]>) => void;
   setExportUrl: (url: string | null) => void;
   setMaskOpacity: (opacity: number) => void;
   setDiscoveryTaskId: (id: string | null) => void;
@@ -322,6 +324,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   setTaskStatus: (status, message) => set((s) => ({ taskStatus: status, taskMessage: message ?? s.taskMessage })),
   setErrorType: (errorType) => set({ errorType }),
   setMaskUrls: (urls) => set({ maskUrls: urls }),
+  mergeMaskUrls: (urls) =>
+    set((s) => {
+      const merged = { ...s.maskUrls };
+      for (const [imgId, newUrls] of Object.entries(urls)) {
+        const existing = merged[imgId] || [];
+        const combined = [...existing];
+        for (const u of newUrls) {
+          if (!combined.includes(u)) combined.push(u);
+        }
+        merged[imgId] = combined;
+      }
+      return { maskUrls: merged };
+    }),
   setExportUrl: (url) => set({ exportUrl: url }),
   setMaskOpacity: (opacity) => set({ maskOpacity: opacity }),
   setDiscoveryTaskId: (id) => set({ discoveryTaskId: id }),

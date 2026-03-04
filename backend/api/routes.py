@@ -111,6 +111,7 @@ class Mode3SelectRequest(BaseModel):
     categories: list[CategoryInstanceRef] | None = Field(None, description="多类别参考（可选）")
     ref_images: list[RefImageItem] | None = Field(None, description="多参考图列表（单类别模式）")
     category_color: str | None = Field(None, description="单类别颜色 hex（用于统一渲染颜色）")
+    manual_mask_urls: list[str] | None = Field(None, description="参考图手动标注 Mask URL 列表（纳入特征融合）")
 
 
 class ManualSamRequest(BaseModel):
@@ -366,9 +367,11 @@ async def annotate_mode3_select(req: Mode3SelectRequest):
         task_id=task_id,
         categories=cats_json, ref_images=refs_json,
         category_color=req.category_color,
+        manual_mask_urls=req.manual_mask_urls,
     )
-    logger.info("Mode3 select task: %s (instance=%d, targets=%d)",
-                task_id, req.selected_instance_id, len(req.target_images))
+    logger.info("Mode3 select task: %s (instance=%d, targets=%d, manual_masks=%d)",
+                task_id, req.selected_instance_id, len(req.target_images),
+                len(req.manual_mask_urls) if req.manual_mask_urls else 0)
     return {"task_id": task_id, "status": "pending", "mode": "mode3"}
 
 

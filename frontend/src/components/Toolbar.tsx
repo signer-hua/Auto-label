@@ -204,9 +204,11 @@ const Toolbar: React.FC = () => {
     let reqRefImages = undefined;
 
     if (hasCategories) {
+      const refImgId = refImage.id;
       reqCategories = mode3CategoryRefs.map(ref => {
         const cat = categories.find(c => c.id === ref.categoryId);
-        return { name: cat?.name || 'unknown', instance_ids: ref.instanceIds, color: cat?.color };
+        const resolvedColor = useAppStore.getState().getResolvedColor(refImgId, ref.categoryId);
+        return { name: cat?.name || 'unknown', instance_ids: ref.instanceIds, color: resolvedColor };
       });
     }
     if (refImages.length > 0) {
@@ -223,13 +225,17 @@ const Toolbar: React.FC = () => {
       }).filter(Boolean) as any[];
     }
 
-    const activeCat = activeCategoryId ? categories.find(c => c.id === activeCategoryId) : null;
+    const refImgId2 = refImage.id;
+    const resolvedCatColor = activeCategoryId
+      ? useAppStore.getState().getResolvedColor(refImgId2, activeCategoryId) : undefined;
+    const refManualMasks = useAppStore.getState().maskUrls[refImgId2] || [];
     const result = await startMode3Select({
       discovery_task_id: discoveryTaskId,
       ref_image_id: refImage.id, ref_image_path: refImage.path,
       selected_instance_id: selectedInstanceIds[0] ?? 0,
       target_images: targetImages, categories: reqCategories, ref_images: reqRefImages,
-      category_color: activeCat?.color,
+      category_color: resolvedCatColor,
+      manual_mask_urls: refManualMasks.length > 0 ? refManualMasks : undefined,
     });
     setTask(result.task_id, 'pending');
   }, [selectedInstanceIds, selectedImageId, discoveryTaskId, images, categories, mode3CategoryRefs, refImages, setTask]);

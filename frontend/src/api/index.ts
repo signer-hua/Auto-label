@@ -125,6 +125,7 @@ export async function startMode3Select(params: {
   categories?: CategoryInstanceRef[];
   ref_images?: RefImageParam[];
   category_color?: string;
+  manual_mask_urls?: string[];
 }): Promise<{ task_id: string; status: string; mode: string }> {
   const { data } = await api.post('/annotate/mode3/select', params);
   return data;
