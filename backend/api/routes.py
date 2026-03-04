@@ -787,14 +787,16 @@ async def erase_mask_region(req: EraseMaskRequest):
         mask_img = PILImage.open(mask_path).convert("RGBA")
         mask_np = np.array(mask_img)
 
+        alpha = mask_np[:, :, 3].copy()
         for pt in req.erase_points:
             x, y = int(round(pt[0])), int(round(pt[1]))
-            cv2.circle(mask_np[:, :, 3], (x, y), req.eraser_size, 0, -1)
+            cv2.circle(alpha, (x, y), req.eraser_size, 0, -1)
+        mask_np[:, :, 3] = alpha
 
         erased = PILImage.fromarray(mask_np, mode="RGBA")
         erased.save(str(mask_path), format="PNG", optimize=True)
 
-        remaining = (mask_np[:, :, 3] > 0).sum()
+        remaining = int((alpha > 0).sum())
         logger.info("Erased mask %s: %d points, remaining pixels=%d",
                      mask_filename, len(req.erase_points), remaining)
         return {"message": "擦除完成", "mask_url": req.mask_url, "remaining_pixels": int(remaining)}
