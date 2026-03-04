@@ -443,18 +443,105 @@
 
 ## 环境要求
 
-| 项目 | 最低要求 |
-|------|----------|
-| Python | >= 3.12 |
-| PyTorch | >= 2.7 |
-| CUDA | >= 12.6 |
-| GPU 显存 | >= 8GB（优化后） |
-| Node.js | >= 18 |
-| Redis | >= 5.0 |
+| 项目 | 验证版本 | 最低要求 |
+|------|----------|----------|
+| OS | Windows 10/11 | Windows / Linux |
+| Python | 3.12.12 | >= 3.12 |
+| PyTorch | 2.7.0+cu126 | >= 2.7 |
+| CUDA | 12.6 | >= 12.6 |
+| GPU | RTX 4060 Laptop (8GB) | >= 8GB 显存 |
+| Node.js | 18.19.0 | >= 18 |
+| npm | 10.2.3 | >= 10 |
+| Redis | 5.0.14 | >= 5.0 |
 
-## 快速开始
+## 环境搭建（详细步骤）
 
-### 手动启动（4 个终端）
+### 步骤1：创建 Conda 环境
+
+```powershell
+conda create -n auto-label python=3.12 -y
+conda activate auto-label
+```
+
+### 步骤2：安装 PyTorch（必须最先安装）
+
+PyTorch 是所有算法库的基础，必须先装。根据你的 CUDA 版本选择：
+
+```powershell
+# CUDA 12.6（推荐，验证通过）
+pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu126
+
+# CUDA 12.4
+# pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu124
+```
+
+安装后验证：
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+# 应输出: 2.7.0+cu126 和 True
+```
+
+### 步骤3：安装后端依赖
+
+```powershell
+cd Auto-label
+pip install -r backend/requirements.txt
+```
+
+> **注意事项：**
+> - `numpy` 锁定 1.26.4（< 2.0），因为 `pycocotools` 和 `torch` 不兼容 numpy 2.x
+> - `peft` 和 `accelerate` 为可选依赖（LoRA 微调功能），不装不影响基础标注
+
+### 步骤4：安装内置算法库
+
+项目内置了 DINOv3 和 SAM3 的源码，需以开发模式安装：
+
+```powershell
+pip install -e backend/libs/dinov3
+pip install -e backend/libs/sam3
+```
+
+安装后验证：
+
+```powershell
+python -c "import dinov3; import sam3; print('OK')"
+# 应输出: OK
+```
+
+### 步骤5：安装前端依赖
+
+```powershell
+cd frontend
+npm install
+cd ..
+```
+
+### 步骤6：准备 Redis
+
+Windows 下载 [Redis 5.0.14](https://github.com/tporadowski/redis/releases)，解压后直接运行：
+
+```powershell
+redis-server.exe
+```
+
+Linux 直接 `sudo apt install redis-server && redis-server`。
+
+### 步骤7：下载模型权重
+
+在项目同级目录创建 `weights/` 文件夹，放入以下权重文件（首次运行会自动从 HuggingFace 下载，也可手动放置）：
+
+```
+weights/
+├── sam3.pt                                              # SAM3 权重
+├── dinov3_vits16_pretrain_lvd1689m-08c60483.pth         # DINOv3 ViT-S/16
+└── grounding-dino-base/                                 # Grounding DINO
+    ├── config.json
+    ├── model.safetensors
+    └── preprocessor_config.json
+```
+
+## 快速启动（4 个终端）
 
 ```powershell
 # 终端1: Redis
@@ -466,14 +553,44 @@ $env:PYTHONPATH = (Get-Location).Path
 celery -A backend.worker worker --concurrency=1 --pool=solo -l info -Q high_priority,low_priority,celery
 
 # 终端3: FastAPI
+cd Auto-label
 $env:PYTHONPATH = (Get-Location).Path
 uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
 # 终端4: 前端
-cd frontend && npm run dev
+cd Auto-label/frontend
+npm run dev
 ```
 
 访问 **http://localhost:5173** 开始使用。
+
+### 完整依赖版本清单
+
+<details>
+<summary>点击展开完整 pip list（验证通过的版本组合）</summary>
+
+| 包名 | 版本 | 用途 |
+|------|------|------|
+| torch | 2.7.0+cu126 | 深度学习框架 |
+| torchvision | 0.22.0+cu126 | 图像处理 |
+| numpy | 1.26.4 | 数值计算 |
+| fastapi | 0.135.1 | API 框架 |
+| uvicorn | 0.41.0 | ASGI 服务器 |
+| celery | 5.6.2 | 异步任务队列 |
+| redis | 6.4.0 | 键值存储 |
+| Pillow | 12.0.0 | 图像 I/O |
+| opencv-python-headless | 4.11.0.86 | 图像处理 |
+| scipy | 1.17.1 | 科学计算 |
+| scikit-learn | 1.8.0 | 聚类 |
+| scikit-image | 0.26.0 | 实例分割后处理 |
+| transformers | 5.2.0 | Grounding DINO |
+| timm | 1.0.25 | SAM3 骨干网络 |
+| huggingface_hub | 1.5.0 | 模型下载 |
+| peft | 0.18.1 | LoRA 微调（可选） |
+| accelerate | 1.12.0 | 训练加速（可选） |
+| pydantic | 2.12.5 | 数据校验 |
+
+</details>
 
 ## 使用指南
 
