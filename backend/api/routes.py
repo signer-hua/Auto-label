@@ -1,0 +1,803 @@
+"""
+API 路由模块
+实现核心接口：
+    POST /upload                — 上传图像
+    GET  /images                — 获取图片列表
+    DELETE /images/{id}         — 删除图片
+    POST /annotate/mode1        — 模式1：文本提示标注
+    POST /annotate/mode2        — 模式2：框选批量标注
+    POST /annotate/mode3        — 模式3 阶段1：粗分割实例生成
+    POST /annotate/mode3/select — 模式3 阶段2：选中实例跨图标注
+    GET  /tasks/{task_id}       — 查询任务状态
+    POST /tasks/{task_id}/pause — 暂停任务
+    POST /tasks/{task_id}/resume — 恢复任务
+    POST /tasks/{task_id}/cancel — 取消任务
+    GET  /export/{task_id}/{fmt} — 多格式导出（coco/voc/yolo）
+"""
+import json
+import uuid
+import logging
+from typing import Optional
+
+import redis
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from pydantic import BaseModel, Field
+
+from backend.core.config import REDIS_URL, IMAGE_DIR, REDIS_TASK_EXPIRE
+from backend.core.exceptions import TaskNotFoundError, FileUploadError
+from backend.services.storage import save_upload_file, get_image_url
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api", tags=["标注"])
+
+
+def _deduplicate_overlapping(annotations: list[dict]) -> list[dict]:
+    """同图片同类别标注重叠去重：IoU >= 0.3 的合并为外接矩形"""
+    from itertools import groupby
+
+    def bbox_iou(a: list[float], b: list[float]) -> float:
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        ix1, iy1 = max(ax, bx), max(ay, by)
+        ix2, iy2 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        union = aw * ah + bw * bh - inter
+        return inter / union if union > 0 else 0
+
+    sorted_anns = sorted(annotations, key=lambda a: (a.get("image_id", ""), a.get("category_id", 0)))
+    result = []
+    for _, group in groupby(sorted_anns, key=lambda a: (a.get("image_id", ""), a.get("category_id", 0))):
+        items = list(group)
+        if len(items) <= 1:
+            result.extend(items)
+            continue
+        merged_flags = [False] * len(items)
+        for i in range(len(items)):
+            if merged_flags[i]:
+                continue
+            current = items[i]
+            cb = list(current["bbox"])
+            for j in range(i + 1, len(items)):
+                if merged_flags[j]:
+                    continue
+                if bbox_iou(cb, items[j]["bbox"]) >= 0.3:
+                    ob = items[j]["bbox"]
+                    nx = min(cb[0], ob[0])
+                    ny = min(cb[1], ob[1])
+                    nw = max(cb[0] + cb[2], ob[0] + ob[2]) - nx
+                    nh = max(cb[1] + cb[3], ob[1] + ob[3]) - ny
+                    cb = [nx, ny, nw, nh]
+                    current["area"] = current.get("area", 0) + items[j].get("area", 0)
+                    merged_flags[j] = True
+            current["bbox"] = cb
+            result.append(current)
+    return result
+
+
+def _get_redis():
+    """获取 Redis 连接"""
+    return redis.Redis.from_url(REDIS_URL, decode_responses=True)
+
+
+# ==================== 请求/响应模型 ====================
+
+class UploadResponse(BaseModel):
+    """上传响应"""
+    image_id: str
+    filename: str
+    url: str
+    path: str
+
+
+class Mode1Request(BaseModel):
+    """模式1 文本标注请求（支持全局类别绑定）"""
+    text_prompt: str = Field(..., description="文本提示，支持逗号分隔或完整句子")
+    image_ids: list[str] = Field(..., description="待标注图像 ID 列表")
+    image_paths: list[str] = Field(..., description="待标注图像路径列表")
+    category_name: str | None = Field(None, description="绑定的全局类别名称")
+    category_color: str | None = Field(None, description="绑定的全局类别颜色 hex")
+
+
+class PreviewRequest(BaseModel):
+    """模式1 目标预览请求（轻量检测，不生成 Mask）"""
+    text_prompt: str = Field(..., description="文本提示")
+    image_id: str = Field(..., description="图片 ID")
+    image_path: str = Field(..., description="图片路径")
+
+
+class RefImageItem(BaseModel):
+    """多参考图项"""
+    path: str = Field(..., description="参考图本地路径")
+    bbox: list[float] = Field(..., description="框选坐标 [x1,y1,x2,y2]")
+    weight: float = Field(default=1.0, description="参考图权重（0.1~2.0）")
+
+
+class CategoryBboxRef(BaseModel):
+    """多类别框选参考"""
+    name: str = Field(..., description="类别名称")
+    bboxes: list[list[float]] = Field(..., description="框选坐标列表 [[x1,y1,x2,y2], ...]")
+    ref_images: list[RefImageItem] | None = Field(None, description="多参考图列表")
+    color: str | None = Field(None, description="类别颜色 hex（如 #FF5733）")
+
+
+class Mode2Request(BaseModel):
+    """模式2 标注请求（支持多类别 + 多参考图）"""
+    ref_image_id: str = Field(..., description="首图（参考图）ID")
+    ref_image_path: str = Field(..., description="首图本地路径")
+    bbox: list[float] = Field(default=[], description="单类别框选坐标 [x1,y1,x2,y2]（向后兼容）")
+    target_images: list[dict] = Field(..., description="待标注图像列表 [{id, path}]")
+    categories: list[CategoryBboxRef] | None = Field(None, description="多类别参考（可选）")
+    ref_images: list[RefImageItem] | None = Field(None, description="多参考图列表（单类别模式）")
+    category_color: str | None = Field(None, description="单类别颜色 hex（用于统一渲染颜色）")
+
+
+class Mode3DiscoveryRequest(BaseModel):
+    """模式3 阶段1：粗分割实例生成请求"""
+    ref_image_id: str = Field(..., description="参考图 ID")
+    ref_image_path: str = Field(..., description="参考图本地路径")
+
+
+class CategoryInstanceRef(BaseModel):
+    """多类别实例参考"""
+    name: str = Field(..., description="类别名称")
+    instance_ids: list[int] = Field(..., description="选中的实例 ID 列表")
+    color: str | None = Field(None, description="类别颜色 hex（如 #FF5733）")
+
+
+class Mode3SelectRequest(BaseModel):
+    """模式3 阶段2：选中实例跨图标注请求（支持多类别 + 多实例 + 多参考图）"""
+    discovery_task_id: str = Field(..., description="阶段1 的 task_id")
+    ref_image_id: str = Field(..., description="参考图 ID")
+    ref_image_path: str = Field(..., description="参考图本地路径")
+    selected_instance_id: int = Field(default=0, description="单实例 ID（向后兼容）")
+    target_images: list[dict] = Field(..., description="待标注图像列表 [{id, path}]")
+    categories: list[CategoryInstanceRef] | None = Field(None, description="多类别参考（可选）")
+    ref_images: list[RefImageItem] | None = Field(None, description="多参考图列表（单类别模式）")
+    category_color: str | None = Field(None, description="单类别颜色 hex（用于统一渲染颜色）")
+    manual_mask_urls: list[str] | None = Field(None, description="参考图手动标注 Mask URL 列表（纳入特征融合）")
+
+
+class ManualSamRequest(BaseModel):
+    """手动标注触发 SAM3 请求（支持类别颜色）"""
+    image_id: str = Field(..., description="图片 ID")
+    image_path: str = Field(..., description="图片路径")
+    bbox: list[float] = Field(..., description="手动框选坐标 [x1,y1,x2,y2]")
+    category_color: str | None = Field(None, description="类别颜色 hex（如 #FF5733）")
+    category_name: str | None = Field(None, description="类别名称")
+
+
+class CorrectMaskRequest(BaseModel):
+    """人机协同负向提示修正 Mask 请求"""
+    image_id: str = Field(..., description="图片 ID")
+    image_path: str = Field(..., description="图片路径")
+    positive_boxes: list[list[float]] = Field(..., description="正向框列表 [[x1,y1,x2,y2], ...]")
+    negative_boxes: list[list[float]] = Field(default=[], description="负向框列表 [[x1,y1,x2,y2], ...]")
+    category_color: str | None = Field(None, description="类别颜色 hex")
+    category_name: str | None = Field(None, description="类别名称")
+
+
+class TaskStatusResponse(BaseModel):
+    """任务状态响应"""
+    task_id: str
+    status: str
+    progress: int = 0
+    total: int = 0
+    message: str = ""
+    mode: Optional[str] = None
+    mask_urls: Optional[dict] = None
+    export_url: Optional[str] = None
+    instance_masks: Optional[list] = None
+    error_type: Optional[str] = None
+    image_scores: Optional[dict] = None   # 每图置信度评分 {img_id: {total, ...}}
+    mask_url: Optional[str] = None        # 手动标注单个 Mask URL
+
+
+# ==================== 接口实现 ====================
+
+@router.post("/upload", response_model=UploadResponse)
+async def upload_image(file: UploadFile = File(...)):
+    """上传图像文件，存入 /data/images/，返回 id+url+path。"""
+    try:
+        image_id, original_name, saved_path = await save_upload_file(file)
+        ext = saved_path.suffix
+        url = get_image_url(image_id, ext)
+        logger.info("Uploaded: %s -> %s (id=%s)", original_name, saved_path, image_id)
+        return UploadResponse(image_id=image_id, filename=original_name, url=url, path=str(saved_path))
+    except ValueError as e:
+        raise FileUploadError(file.filename or "unknown", str(e))
+    except Exception as e:
+        logger.exception("Upload failed: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@router.get("/images")
+async def list_images():
+    """获取已上传的图片列表。"""
+    images = []
+    if IMAGE_DIR.exists():
+        for f in sorted(IMAGE_DIR.iterdir()):
+            if f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}:
+                image_id = f.stem
+                images.append({
+                    "image_id": image_id, "filename": f.name,
+                    "url": get_image_url(image_id, f.suffix), "path": str(f),
+                })
+    return {"images": images, "count": len(images)}
+
+
+@router.delete("/images/{image_id}")
+async def delete_image(image_id: str):
+    """删除指定图片及其关联的 Mask 文件。"""
+    from backend.core.config import MASK_DIR
+
+    deleted = False
+    for f in IMAGE_DIR.iterdir():
+        if f.stem == image_id:
+            f.unlink()
+            deleted = True
+            break
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Image not found: {image_id}")
+
+    if MASK_DIR.exists():
+        for mask_file in MASK_DIR.iterdir():
+            if mask_file.name.startswith(image_id):
+                mask_file.unlink()
+
+    logger.info("Deleted image: %s", image_id)
+    return {"message": "ok", "image_id": image_id}
+
+
+# ==================== 模式1：文本提示标注 ====================
+
+@router.post("/annotate/mode1")
+async def annotate_mode1(req: Mode1Request):
+    """模式1：文本 → Grounding DINO → SAM3 → Mask PNG"""
+    text = req.text_prompt.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text prompt cannot be empty")
+    if len(req.image_ids) == 0:
+        raise HTTPException(status_code=400, detail="No images provided")
+
+    task_id = uuid.uuid4().hex
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending", "progress": 0, "total": len(req.image_ids),
+        "message": "Task queued...", "mode": "mode1",
+    })
+    r.expire(f"task:{task_id}", REDIS_TASK_EXPIRE)
+
+    from backend.worker import process_text_annotation
+    process_text_annotation.delay(
+        image_paths=req.image_paths, image_ids=req.image_ids,
+        text_prompt=text, task_id=task_id,
+        category_name=req.category_name,
+        category_color=req.category_color,
+    )
+    logger.info("Mode1 task: %s (prompt='%s', images=%d, cat=%s)",
+                task_id, text, len(req.image_ids), req.category_name)
+    return {"task_id": task_id, "status": "pending", "mode": "mode1"}
+
+
+# ==================== 模式1 目标预览（轻量检测） ====================
+
+@router.post("/annotate/preview")
+async def annotate_preview(req: PreviewRequest):
+    """模式1 目标预览：仅运行 Grounding DINO 检测，返回目标框（不生成 Mask）。"""
+    from backend.models.grounding_dino_engine import GroundingDINOEngine
+    from PIL import Image
+
+    text = req.text_prompt.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text prompt cannot be empty")
+
+    gd = GroundingDINOEngine.get_instance()
+    if not gd._warmed_up:
+        raise HTTPException(status_code=503, detail="Model not ready, please wait for worker warmup")
+
+    target_image = Image.open(req.image_path).convert("RGB")
+    categories = [c.strip() for c in
+                  text.replace('，', ',').replace('、', ',').replace('；', ',').split(',')
+                  if c.strip()]
+    if not categories:
+        categories = [text]
+
+    detections = gd.detect(target_image, categories)
+    return {"detections": detections}
+
+
+# ==================== 模式2：框选批量标注 ====================
+
+@router.post("/annotate/mode2")
+async def annotate_mode2(req: Mode2Request):
+    """模式2：框选 → SAM3 → DINOv3 匹配 → 批量 SAM3 → 红色 Mask PNG"""
+    task_id = uuid.uuid4().hex
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending", "progress": 0, "total": len(req.target_images),
+        "message": "Task queued...", "mode": "mode2",
+    })
+    r.expire(f"task:{task_id}", REDIS_TASK_EXPIRE)
+
+    target_paths = [img["path"] for img in req.target_images]
+    target_ids = [img["id"] for img in req.target_images]
+
+    cats_json = None
+    if req.categories:
+        cats_json = [{"name": c.name, "bboxes": c.bboxes, "color": c.color,
+                      "ref_images": [ri.model_dump() for ri in c.ref_images] if c.ref_images else []}
+                     for c in req.categories]
+
+    refs_json = None
+    if req.ref_images:
+        refs_json = [ri.model_dump() for ri in req.ref_images]
+
+    from backend.worker import process_batch_annotation
+    process_batch_annotation.delay(
+        ref_image_path=req.ref_image_path, bbox=req.bbox,
+        target_image_paths=target_paths, target_image_ids=target_ids,
+        task_id=task_id, categories=cats_json, ref_images=refs_json,
+        category_color=req.category_color,
+    )
+    logger.info("Mode2 task: %s (ref=%s, targets=%d, refs=%d)",
+                task_id, req.ref_image_id, len(req.target_images),
+                len(req.ref_images) if req.ref_images else 1)
+    return {"task_id": task_id, "status": "pending", "mode": "mode2"}
+
+
+# ==================== 模式3：选实例跨图标注 ====================
+
+@router.post("/annotate/mode3")
+async def annotate_mode3_discovery(req: Mode3DiscoveryRequest):
+    """
+    模式3 阶段1：粗分割实例生成。
+    DINOv3 聚类 → SAM3 粗分割 → 返回实例 Mask URL 列表供用户选择。
+    """
+    task_id = uuid.uuid4().hex
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending", "progress": 0, "total": 1,
+        "message": "Generating instance proposals...", "mode": "mode3_discovery",
+    })
+    r.expire(f"task:{task_id}", REDIS_TASK_EXPIRE)
+
+    from backend.worker import process_instance_discovery
+    process_instance_discovery.delay(
+        ref_image_path=req.ref_image_path,
+        ref_image_id=req.ref_image_id,
+        task_id=task_id,
+    )
+    logger.info("Mode3 discovery task: %s (ref=%s)", task_id, req.ref_image_id)
+    return {"task_id": task_id, "status": "pending", "mode": "mode3_discovery"}
+
+
+@router.post("/annotate/mode3/select")
+async def annotate_mode3_select(req: Mode3SelectRequest):
+    """
+    模式3 阶段2：用户选中实例后，跨图批量标注。
+    DINOv3 实例特征 → 遍历目标图匹配 → SAM3 精准 Mask → 绿色 PNG
+    """
+    if len(req.target_images) == 0:
+        raise HTTPException(status_code=400, detail="No target images provided")
+
+    task_id = uuid.uuid4().hex
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending", "progress": 0, "total": len(req.target_images),
+        "message": "Task queued...", "mode": "mode3",
+    })
+    r.expire(f"task:{task_id}", REDIS_TASK_EXPIRE)
+
+    target_paths = [img["path"] for img in req.target_images]
+    target_ids = [img["id"] for img in req.target_images]
+
+    cats_json = None
+    if req.categories:
+        cats_json = [{"name": c.name, "instance_ids": c.instance_ids, "color": c.color} for c in req.categories]
+
+    refs_json = None
+    if req.ref_images:
+        refs_json = [ri.model_dump() for ri in req.ref_images]
+
+    from backend.worker import process_instance_annotation
+    process_instance_annotation.delay(
+        ref_image_path=req.ref_image_path,
+        ref_image_id=req.ref_image_id,
+        selected_instance_id=req.selected_instance_id,
+        target_image_paths=target_paths,
+        target_image_ids=target_ids,
+        task_id=task_id,
+        categories=cats_json, ref_images=refs_json,
+        category_color=req.category_color,
+        manual_mask_urls=req.manual_mask_urls,
+    )
+    logger.info("Mode3 select task: %s (instance=%d, targets=%d, manual_masks=%d)",
+                task_id, req.selected_instance_id, len(req.target_images),
+                len(req.manual_mask_urls) if req.manual_mask_urls else 0)
+    return {"task_id": task_id, "status": "pending", "mode": "mode3"}
+
+
+# ==================== 任务控制：暂停/恢复/取消 ====================
+
+@router.post("/tasks/{task_id}/pause")
+async def pause_task(task_id: str):
+    """暂停正在执行的任务。Worker 会在下一个图片处理前检查状态。"""
+    r = _get_redis()
+    task_data = r.hgetall(f"task:{task_id}")
+    if not task_data:
+        raise TaskNotFoundError(task_id)
+
+    status = task_data.get("status")
+    if status not in ("processing", "pending"):
+        raise HTTPException(status_code=400, detail=f"Cannot pause task in '{status}' state")
+
+    r.hset(f"task:{task_id}", "status", "paused")
+    logger.info("Task paused: %s", task_id)
+    return {"task_id": task_id, "status": "paused"}
+
+
+@router.post("/tasks/{task_id}/resume")
+async def resume_task(task_id: str):
+    """恢复暂停的任务。"""
+    r = _get_redis()
+    task_data = r.hgetall(f"task:{task_id}")
+    if not task_data:
+        raise TaskNotFoundError(task_id)
+
+    if task_data.get("status") != "paused":
+        raise HTTPException(status_code=400, detail="Task is not paused")
+
+    r.hset(f"task:{task_id}", "status", "processing")
+    logger.info("Task resumed: %s", task_id)
+    return {"task_id": task_id, "status": "processing"}
+
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    """取消任务。Worker 会在下一个图片处理前检查状态并终止。"""
+    r = _get_redis()
+    task_data = r.hgetall(f"task:{task_id}")
+    if not task_data:
+        raise TaskNotFoundError(task_id)
+
+    status = task_data.get("status")
+    if status in ("success", "canceled"):
+        raise HTTPException(status_code=400, detail=f"Cannot cancel task in '{status}' state")
+
+    r.hset(f"task:{task_id}", mapping={"status": "canceled", "message": "Task canceled by user."})
+    logger.info("Task canceled: %s", task_id)
+    return {"task_id": task_id, "status": "canceled"}
+
+
+# ==================== 任务状态查询 ====================
+
+@router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
+async def get_task_status(task_id: str):
+    """查询任务状态、进度、Mask URL、实例列表等。"""
+    r = _get_redis()
+    task_data = r.hgetall(f"task:{task_id}")
+
+    if not task_data:
+        raise TaskNotFoundError(task_id)
+
+    # 解析 JSON 字段
+    mask_urls = None
+    if "mask_urls" in task_data:
+        try:
+            mask_urls = json.loads(task_data["mask_urls"])
+        except json.JSONDecodeError:
+            mask_urls = None
+
+    instance_masks = None
+    if "instance_masks" in task_data:
+        try:
+            instance_masks = json.loads(task_data["instance_masks"])
+        except json.JSONDecodeError:
+            instance_masks = None
+
+    image_scores = None
+    if "image_scores" in task_data:
+        try:
+            image_scores = json.loads(task_data["image_scores"])
+        except json.JSONDecodeError:
+            image_scores = None
+
+    return TaskStatusResponse(
+        task_id=task_id,
+        status=task_data.get("status", "unknown"),
+        progress=int(task_data.get("progress", 0)),
+        total=int(task_data.get("total", 0)),
+        message=task_data.get("message", ""),
+        mode=task_data.get("mode"),
+        mask_urls=mask_urls,
+        export_url=task_data.get("export_url"),
+        instance_masks=instance_masks,
+        error_type=task_data.get("error_type"),
+        image_scores=image_scores,
+        mask_url=task_data.get("mask_url"),
+    )
+
+
+# ==================== 多格式导出 ====================
+
+@router.get("/export/{task_id}/{fmt}")
+async def export_annotations(task_id: str, fmt: str):
+    """
+    多格式导出标注结果。
+
+    Args:
+        task_id: 任务 ID
+        fmt: 导出格式 (coco / voc / yolo)
+
+    Returns:
+        COCO: 直接返回 JSON
+        VOC: 返回 XML 字符串列表
+        YOLO: 返回 txt 字符串列表
+    """
+    from backend.core.config import EXPORT_DIR
+    from backend.services.mask_utils import generate_voc_annotation, generate_yolo_annotation
+
+    export_path = EXPORT_DIR / f"{task_id}_coco.json"
+    if not export_path.exists():
+        raise HTTPException(status_code=404, detail=f"Export not found for task: {task_id}")
+
+    coco_data = json.loads(export_path.read_text())
+
+    coco_data["annotations"] = _deduplicate_overlapping(coco_data.get("annotations", []))
+
+    if fmt == "coco":
+        return coco_data
+
+    elif fmt == "voc":
+        # 将 COCO 转为 VOC XML
+        # 按 image_id 分组
+        img_map = {img["id"]: img for img in coco_data.get("images", [])}
+        cat_map = {cat["id"]: cat["name"] for cat in coco_data.get("categories", [])}
+
+        voc_results = {}
+        for ann in coco_data.get("annotations", []):
+            img_id = ann["image_id"]
+            img_info = img_map.get(img_id, {})
+            if img_id not in voc_results:
+                voc_results[img_id] = {
+                    "filename": img_info.get("file_name", ""),
+                    "width": img_info.get("width", 0),
+                    "height": img_info.get("height", 0),
+                    "objects": [],
+                }
+            # COCO bbox [x,y,w,h] → VOC [x1,y1,x2,y2]
+            bx, by, bw, bh = ann["bbox"]
+            voc_results[img_id]["objects"].append({
+                "name": cat_map.get(ann["category_id"], "object"),
+                "bbox": [bx, by, bx + bw, by + bh],
+            })
+
+        voc_xmls = {}
+        for img_id, data in voc_results.items():
+            voc_xmls[img_id] = generate_voc_annotation(
+                data["filename"], data["width"], data["height"], data["objects"]
+            )
+        return {"format": "voc", "annotations": voc_xmls}
+
+    elif fmt == "yolo":
+        img_map = {img["id"]: img for img in coco_data.get("images", [])}
+
+        yolo_results = {}
+        for ann in coco_data.get("annotations", []):
+            img_id = ann["image_id"]
+            img_info = img_map.get(img_id, {})
+            if img_id not in yolo_results:
+                yolo_results[img_id] = {
+                    "width": img_info.get("width", 1),
+                    "height": img_info.get("height", 1),
+                    "objects": [],
+                }
+            bx, by, bw, bh = ann["bbox"]
+            yolo_results[img_id]["objects"].append({
+                "class_id": ann["category_id"] - 1,
+                "bbox": [bx, by, bx + bw, by + bh],
+            })
+
+        yolo_txts = {}
+        for img_id, data in yolo_results.items():
+            yolo_txts[img_id] = generate_yolo_annotation(
+                data["width"], data["height"], data["objects"]
+            )
+        return {"format": "yolo", "annotations": yolo_txts}
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported format: {fmt}. Use coco/voc/yolo.")
+
+
+# ==================== 手动标注：单框触发 SAM3 ====================
+
+@router.post("/annotate/manual")
+async def annotate_manual(req: ManualSamRequest):
+    """手动框选 → SAM3 生成 Mask（轻量快速任务）"""
+    task_id = uuid.uuid4().hex
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending", "progress": 0, "total": 1,
+        "message": "Generating manual mask...", "mode": "manual",
+    })
+    r.expire(f"task:{task_id}", 3600)
+
+    from backend.worker import process_manual_sam
+    process_manual_sam.delay(
+        image_path=req.image_path, image_id=req.image_id,
+        bbox=req.bbox, task_id=task_id,
+        category_color=req.category_color,
+        category_name=req.category_name,
+    )
+    logger.info("Manual SAM task: %s (image=%s)", task_id, req.image_id)
+    return {"task_id": task_id, "status": "pending", "mode": "manual"}
+
+
+# ==================== 人机协同负向提示修正 ====================
+
+@router.post("/annotate/correct")
+async def annotate_correct(req: CorrectMaskRequest):
+    """
+    人机协同负向提示：正向框+负向框 → SAM3 生成修正后的 Mask。
+    用户通过红色负向框排除错误区域，蓝色正向框保留目标区域。
+    """
+    if not req.positive_boxes:
+        raise HTTPException(status_code=400, detail="At least one positive box is required")
+
+    task_id = uuid.uuid4().hex
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending", "progress": 0, "total": 1,
+        "message": "Generating corrected mask...", "mode": "correct",
+    })
+    r.expire(f"task:{task_id}", 3600)
+
+    from backend.worker import process_correct_mask
+    process_correct_mask.delay(
+        image_path=req.image_path,
+        image_id=req.image_id,
+        positive_boxes=req.positive_boxes,
+        negative_boxes=req.negative_boxes,
+        task_id=task_id,
+        category_color=req.category_color,
+        category_name=req.category_name,
+    )
+    logger.info("Correct mask task: %s (image=%s, +%d -%d boxes)",
+                task_id, req.image_id, len(req.positive_boxes), len(req.negative_boxes))
+    return {"task_id": task_id, "status": "pending", "mode": "correct"}
+
+
+# ==================== LoRA 微调 ====================
+
+class LoraFinetuneRequest(BaseModel):
+    """LoRA 微调请求"""
+    image_ids: list[str] = Field(..., description="用于微调的标注图片 ID 列表（≥5张）")
+    category_id: str = Field(..., description="目标类别 ID")
+    epochs: int = Field(default=10, description="训练轮次（建议 5~20）")
+
+
+@router.post("/annotate/start_lora_finetune")
+async def start_lora_finetune(req: LoraFinetuneRequest):
+    """
+    启动 SAM3 LoRA 微调任务。
+    基于已标注图片对 SAM3 mask_decoder 做参数高效微调。
+    """
+    if len(req.image_ids) < 5:
+        raise HTTPException(status_code=400, detail="至少需要 5 张标注图片")
+
+    try:
+        from peft import LoraConfig
+    except ImportError:
+        raise HTTPException(status_code=503, detail="LoRA 依赖未安装，请执行: pip install peft accelerate")
+
+    image_paths = []
+    for img_id in req.image_ids:
+        found = False
+        for f in IMAGE_DIR.iterdir():
+            if f.stem == img_id:
+                image_paths.append(str(f))
+                found = True
+                break
+        if not found:
+            raise HTTPException(status_code=404, detail=f"Image not found: {img_id}")
+
+    task_id = uuid.uuid4().hex
+    r = _get_redis()
+    r.hset(f"task:{task_id}", mapping={
+        "status": "pending", "progress": 0, "total": 1,
+        "message": "LoRA finetune queued...", "mode": "lora_finetune",
+    })
+    r.expire(f"task:{task_id}", REDIS_TASK_EXPIRE)
+
+    from backend.worker import process_lora_finetune
+    process_lora_finetune.delay(
+        image_paths=image_paths,
+        image_ids=req.image_ids,
+        category_id=req.category_id,
+        epochs=req.epochs,
+        task_id=task_id,
+    )
+    logger.info("LoRA finetune task: %s (images=%d, category=%s, epochs=%d)",
+                task_id, len(req.image_ids), req.category_id, req.epochs)
+    return {"task_id": task_id, "status": "pending", "mode": "lora_finetune"}
+
+
+# ==================== 缓存清理 ====================
+
+@router.post("/clean_cache")
+async def clean_cache():
+    """
+    全局重置时清理 exports/ 和 masks/ 目录下所有文件，仅保留 images/。
+    同时清理 Redis 中所有 task: 前缀的键。
+    """
+    import shutil
+    from backend.core.config import MASK_DIR, EXPORT_DIR
+
+    cleaned = {"masks": 0, "exports": 0, "redis_keys": 0}
+    for d, key in [(MASK_DIR, "masks"), (EXPORT_DIR, "exports")]:
+        if d.exists():
+            count = 0
+            for f in d.iterdir():
+                try:
+                    if f.is_file():
+                        f.unlink()
+                        count += 1
+                except Exception as e:
+                    logger.warning("Failed to delete %s: %s", f, e)
+            cleaned[key] = count
+
+    r = _get_redis()
+    task_keys = r.keys("task:*")
+    if task_keys:
+        r.delete(*task_keys)
+        cleaned["redis_keys"] = len(task_keys)
+
+    logger.info("Cache cleaned: %s", cleaned)
+    return {"message": "缓存清理完成", "cleaned": cleaned}
+
+
+# ==================== Mask 区域擦除 ====================
+
+class EraseMaskRequest(BaseModel):
+    """Mask 区域擦除请求"""
+    image_id: str = Field(..., description="图片 ID")
+    mask_url: str = Field(..., description="要擦除的 Mask URL")
+    erase_points: list[list[float]] = Field(..., description="擦除轨迹坐标 [[x,y], ...]")
+    eraser_size: int = Field(default=15, description="橡皮擦半径（像素）")
+
+
+@router.post("/annotate/erase")
+async def erase_mask_region(req: EraseMaskRequest):
+    """
+    精细化橡皮擦：对指定 Mask 的像素级区域擦除。
+    沿擦除轨迹以 eraser_size 为半径绘制圆形区域并置零。
+    """
+    import cv2
+    import numpy as np
+    from PIL import Image as PILImage
+    from backend.core.config import MASK_DIR
+
+    mask_filename = req.mask_url.split('/')[-1]
+    mask_path = MASK_DIR / mask_filename
+    if not mask_path.exists():
+        raise HTTPException(status_code=404, detail=f"Mask not found: {mask_filename}")
+
+    try:
+        mask_img = PILImage.open(mask_path).convert("RGBA")
+        mask_np = np.array(mask_img)
+
+        for pt in req.erase_points:
+            x, y = int(round(pt[0])), int(round(pt[1]))
+            cv2.circle(mask_np[:, :, 3], (x, y), req.eraser_size, 0, -1)
+
+        erased = PILImage.fromarray(mask_np, mode="RGBA")
+        erased.save(str(mask_path), format="PNG", optimize=True)
+
+        remaining = (mask_np[:, :, 3] > 0).sum()
+        logger.info("Erased mask %s: %d points, remaining pixels=%d",
+                     mask_filename, len(req.erase_points), remaining)
+        return {"message": "擦除完成", "mask_url": req.mask_url, "remaining_pixels": int(remaining)}
+    except Exception as e:
+        logger.exception("Erase failed: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Erase failed: {str(e)}")

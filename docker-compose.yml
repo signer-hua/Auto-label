@@ -1,0 +1,57 @@
+# Auto-label Docker Compose
+# 包含：Redis + Celery Worker + FastAPI + 前端构建
+version: '3.8'
+
+services:
+  # Redis 任务队列 + 状态存储
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # Celery Worker（GPU 推理，并发数=1）
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A backend.worker worker --concurrency=1 --pool=solo -l info
+    environment:
+      - REDIS_HOST=redis
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONPATH=/app
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # FastAPI API 服务
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - STATIC_URL_PREFIX=http://localhost:8000
+      - PYTHONPATH=/app
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+volumes:
+  redis_data:
