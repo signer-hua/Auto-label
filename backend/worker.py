@@ -113,10 +113,11 @@ def _handle_gpu_oom(r, task_id: str, e: Exception):
 
 
 def preprocess_image(image: Image.Image) -> Image.Image:
-    """图像预处理：分辨率限制 + 高斯去噪 + CLAHE 对比度增强"""
-    from backend.services.image_utils import resize_image
-    image = resize_image(image)
-
+    """
+    图像预处理：高斯去噪 + CLAHE 对比度增强。
+    注意：不在此处缩放分辨率，SAM3 和 DINOv3 内部各自处理输入尺寸。
+    若在此缩放会导致 bbox 坐标（原图分辨率）与缩放后图像不匹配。
+    """
     img_np = np.array(image)
     if PREPROCESS_DENOISE:
         img_np = cv2.GaussianBlur(img_np, (3, 3), 0)

@@ -185,7 +185,8 @@ const Toolbar: React.FC = () => {
     if (selectedInstanceIds.length === 0 || !activeCategoryId) return;
     setMode3CategoryInstances(activeCategoryId, [...selectedInstanceIds]);
     const catName = categories.find(c => c.id === activeCategoryId)?.name || '';
-    message.success(`已分配到「${catName}」`);
+    message.success(`已将 ${selectedInstanceIds.length} 个实例分配到「${catName}」`);
+    useAppStore.getState().setSelectedInstanceIds([]);
   }, [selectedInstanceIds, activeCategoryId, categories, setMode3CategoryInstances]);
 
   const handleMode3Select = useCallback(async () => {
@@ -374,22 +375,41 @@ const Toolbar: React.FC = () => {
             <>
               <div style={{ color: '#999', fontSize: 12, marginTop: 8 }}>选择实例（Ctrl+多选）</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {instanceMasks.map(inst => (
-                  <Button key={inst.id} size="small"
-                    type={selectedInstanceIds.includes(inst.id) ? 'primary' : 'default'}
-                    onClick={() => {
-                      const ids = useAppStore.getState().selectedInstanceIds;
-                      useAppStore.getState().setSelectedInstanceIds(
-                        ids.includes(inst.id) ? ids.filter(i => i !== inst.id) : [...ids, inst.id]
-                      );
-                    }}
-                    style={{ borderColor: `rgb(${inst.color.join(',')})`, minWidth: 40 }}>#{inst.id}</Button>
-                ))}
+                {instanceMasks.map(inst => {
+                  const assignedRef = mode3CategoryRefs.find(r => r.instanceIds.includes(inst.id));
+                  const assignedCat = assignedRef ? categories.find(c => c.id === assignedRef.categoryId) : null;
+                  const isSelected = selectedInstanceIds.includes(inst.id);
+                  const borderColor = assignedCat ? assignedCat.color : `rgb(${inst.color.join(',')})`;
+                  return (
+                    <Tooltip key={inst.id} title={assignedCat ? `已分配→${assignedCat.name}` : '未分配'}>
+                      <Button size="small"
+                        type={isSelected ? 'primary' : 'default'}
+                        onClick={() => {
+                          const ids = useAppStore.getState().selectedInstanceIds;
+                          useAppStore.getState().setSelectedInstanceIds(
+                            ids.includes(inst.id) ? ids.filter(i => i !== inst.id) : [...ids, inst.id]
+                          );
+                        }}
+                        style={{
+                          borderColor, minWidth: 40,
+                          background: assignedCat && !isSelected ? `${assignedCat.color}22` : undefined,
+                        }}>
+                        #{inst.id}{assignedCat ? '✓' : ''}
+                      </Button>
+                    </Tooltip>
+                  );
+                })}
               </div>
-              {categories.length > 0 && selectedInstanceIds.length > 0 && (
+              {categories.length > 0 && selectedInstanceIds.length > 0 && activeCategoryId && (
                 <Button size="small" icon={<CheckOutlined />} onClick={handleAssignInstances} block style={{ marginTop: 2 }}>
                   分配到「{categories.find(c => c.id === activeCategoryId)?.name || ''}」
                 </Button>
+              )}
+              {categories.length > 0 && selectedInstanceIds.length === 0 && mode3CategoryRefs.length > 0 && (
+                <div style={{ fontSize: 11, color: '#52c41a', marginTop: 2 }}>
+                  已分配 {mode3CategoryRefs.reduce((s, r) => s + r.instanceIds.length, 0)} 个实例，
+                  可继续选择实例分配或手动标注补充
+                </div>
               )}
               <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleMode3Select}
                 disabled={isAnnotating || (selectedInstanceIds.length === 0 && mode3CategoryRefs.length === 0)}
@@ -417,11 +437,15 @@ const Toolbar: React.FC = () => {
             <span style={{ width: 10, height: 10, borderRadius: 2, background: c.color, display: 'inline-block' }} />{c.name}</span>,
         }))}
       />
-      {activeCategoryId && (
-        <div style={{ fontSize: 11, color: categories.find(c => c.id === activeCategoryId)?.color || '#888', marginBottom: 2 }}>
-          手动标注将使用「{categories.find(c => c.id === activeCategoryId)?.name}」的颜色
-        </div>
-      )}
+      {activeCategoryId && (() => {
+        const cat = categories.find(c => c.id === activeCategoryId);
+        return cat ? (
+          <div style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: cat.color, display: 'inline-block', flexShrink: 0 }} />
+            <span style={{ color: cat.color }}>手动标注 →「{cat.name}」颜色一致</span>
+          </div>
+        ) : null;
+      })()}
       {!activeCategoryId && categories.length > 0 && (
         <div style={{ fontSize: 11, color: '#faad14', marginBottom: 2 }}>请选择类别后再手动标注</div>
       )}
